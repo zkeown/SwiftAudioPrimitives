@@ -396,3 +396,281 @@ extension ContiguousComplexMatrix {
         )
     }
 }
+
+// MARK: - Contiguous Real Matrix
+
+/// A memory-efficient real-valued matrix using contiguous storage.
+///
+/// This type stores data in a flat contiguous array with row-major layout, providing:
+/// - Single allocation instead of one per row (unlike `[[Float]]`)
+/// - Better cache locality for sequential access
+/// - More efficient vectorized operations
+/// - Zero-cost flattening (data is already flat)
+///
+/// Use this type for magnitude spectrograms, mel spectrograms, and other
+/// real-valued 2D data where performance is critical.
+///
+/// ## Example Usage
+///
+/// ```swift
+/// // Create from STFT magnitude
+/// let stft = STFT()
+/// let spec = await stft.magnitudeContiguous(audio)
+///
+/// // Access elements
+/// let value = spec[512, 100]
+///
+/// // Access a column (time frame) efficiently
+/// spec.withColumn(100) { column in
+///     // column is a pointer to contiguous freq bins
+///     let centroid = computeCentroid(column)
+/// }
+/// ```
+public struct ContiguousMatrix: Sendable {
+    /// Data stored contiguously in row-major order.
+    public private(set) var data: [Float]
+    /// Number of rows (e.g., frequency bins for spectrograms).
+    public let rows: Int
+    /// Number of columns (e.g., time frames for spectrograms).
+    public let cols: Int
+
+    /// Total number of elements.
+    @inline(__always)
+    public var count: Int { rows * cols }
+
+    /// Create a contiguous matrix from a flat array.
+    ///
+    /// - Parameters:
+    ///   - data: Flat array in row-major order.
+    ///   - rows: Number of rows.
+    ///   - cols: Number of columns.
+    public init(data: [Float], rows: Int, cols: Int) {
+        precondition(data.count == rows * cols, "Data size must equal rows * cols")
+        self.data = data
+        self.rows = rows
+        self.cols = cols
+    }
+
+    /// Create a zero-filled contiguous matrix.
+    ///
+    /// - Parameters:
+    ///   - rows: Number of rows.
+    ///   - cols: Number of columns.
+    public init(rows: Int, cols: Int) {
+        self.data = [Float](repeating: 0, count: rows * cols)
+        self.rows = rows
+        self.cols = cols
+    }
+
+    /// Create from a 2D array (array of arrays).
+    ///
+    /// - Parameter array: 2D array in row-major layout.
+    public init(from array: [[Float]]) {
+        let rows = array.count
+        let cols = array.first?.count ?? 0
+        self.rows = rows
+        self.cols = cols
+
+        // Flatten with pre-allocated capacity
+        var flat = [Float]()
+        flat.reserveCapacity(rows * cols)
+        for row in array {
+            flat.append(contentsOf: row)
+        }
+        self.data = flat
+    }
+
+    /// Access a specific element.
+    ///
+    /// - Parameters:
+    ///   - row: Row index.
+    ///   - col: Column index.
+    /// - Returns: The value at (row, col).
+    @inline(__always)
+    public subscript(row: Int, col: Int) -> Float {
+        get { data[row * cols + col] }
+        set { data[row * cols + col] = newValue }
+    }
+
+    /// Get a row as a slice of the underlying storage.
+    ///
+    /// - Parameter row: Row index.
+    /// - Returns: Array slice containing the row.
+    @inline(__always)
+    public func row(_ row: Int) -> ArraySlice<Float> {
+        let start = row * cols
+        return data[start..<(start + cols)]
+    }
+
+    /// Access column data through a closure with unsafe pointer.
+    ///
+    /// This provides efficient column access by computing indices and
+    /// passing a stride-based view. For spectrograms, columns are time frames.
+    ///
+    /// - Parameters:
+    ///   - col: Column index.
+    ///   - body: Closure receiving base pointer, stride, and count.
+    /// - Returns: The result of the closure.
+    @inline(__always)
+    public func withColumn<T>(
+        _ col: Int,
+        _ body: (_ basePointer: UnsafePointer<Float>, _ stride: Int, _ count: Int) -> T
+    ) -> T {
+        data.withUnsafeBufferPointer { ptr in
+            body(ptr.baseAddress! + col, cols, rows)
+        }
+    }
+
+    /// Access column data through a closure with mutable unsafe pointer.
+    ///
+    /// - Parameters:
+    ///   - col: Column index.
+    ///   - body: Closure receiving mutable base pointer, stride, and count.
+    /// - Returns: The result of the closure.
+    @inline(__always)
+    public mutating func withMutableColumn<T>(
+        _ col: Int,
+        _ body: (_ basePointer: UnsafeMutablePointer<Float>, _ stride: Int, _ count: Int) -> T
+    ) -> T {
+        data.withUnsafeMutableBufferPointer { ptr in
+            body(ptr.baseAddress! + col, cols, rows)
+        }
+    }
+
+    /// Extract a column as an array.
+    ///
+    /// Note: This allocates a new array. Prefer `withColumn` for performance-critical code.
+    ///
+    /// - Parameter col: Column index.
+    /// - Returns: Array containing the column values.
+    public func column(_ col: Int) -> [Float] {
+        var result = [Float](repeating: 0, count: rows)
+        for r in 0..<rows {
+            result[r] = data[r * cols + col]
+        }
+        return result
+    }
+
+    /// Convert to 2D array format.
+    ///
+    /// Use for compatibility with APIs that require `[[Float]]` layout.
+    public func to2DArray() -> [[Float]] {
+        var result = [[Float]]()
+        result.reserveCapacity(rows)
+
+        for r in 0..<rows {
+            let start = r * cols
+            result.append(Array(data[start..<(start + cols)]))
+        }
+
+        return result
+    }
+
+    /// Apply element-wise operation using Accelerate.
+    ///
+    /// - Parameter transform: Closure that transforms the flat data array.
+    /// - Returns: New matrix with transformed data.
+    public func map(_ transform: ([Float]) -> [Float]) -> ContiguousMatrix {
+        ContiguousMatrix(data: transform(data), rows: rows, cols: cols)
+    }
+
+    /// Square all elements (power spectrogram from magnitude).
+    public var squared: ContiguousMatrix {
+        var result = [Float](repeating: 0, count: count)
+        vDSP_vsq(data, 1, &result, 1, vDSP_Length(count))
+        return ContiguousMatrix(data: result, rows: rows, cols: cols)
+    }
+
+    /// Take square root of all elements.
+    public var sqrt: ContiguousMatrix {
+        var result = [Float](repeating: 0, count: count)
+        var n = Int32(count)
+        vvsqrtf(&result, data, &n)
+        return ContiguousMatrix(data: result, rows: rows, cols: cols)
+    }
+
+    /// Take natural log of all elements (with floor for numerical stability).
+    ///
+    /// - Parameter floor: Minimum value before taking log (default: 1e-10).
+    /// - Returns: Log-transformed matrix.
+    public func log(floor: Float = 1e-10) -> ContiguousMatrix {
+        var clamped = [Float](repeating: 0, count: count)
+        var floorVal = floor
+        var maxVal: Float = .greatestFiniteMagnitude
+        vDSP_vclip(data, 1, &floorVal, &maxVal, &clamped, 1, vDSP_Length(count))
+
+        var result = [Float](repeating: 0, count: count)
+        var n = Int32(count)
+        vvlogf(&result, clamped, &n)
+
+        return ContiguousMatrix(data: result, rows: rows, cols: cols)
+    }
+
+    /// Compute sum along rows (result has length = cols).
+    public func sumRows() -> [Float] {
+        var result = [Float](repeating: 0, count: cols)
+
+        data.withUnsafeBufferPointer { ptr in
+            for c in 0..<cols {
+                var sum: Float = 0
+                vDSP_sve(ptr.baseAddress! + c, vDSP_Stride(cols), &sum, vDSP_Length(rows))
+                result[c] = sum
+            }
+        }
+
+        return result
+    }
+
+    /// Compute sum along columns (result has length = rows).
+    public func sumCols() -> [Float] {
+        var result = [Float](repeating: 0, count: rows)
+
+        for r in 0..<rows {
+            var sum: Float = 0
+            let start = r * cols
+            vDSP_sve(data, 1, &sum, vDSP_Length(cols))
+            data.withUnsafeBufferPointer { ptr in
+                vDSP_sve(ptr.baseAddress! + start, 1, &sum, vDSP_Length(cols))
+            }
+            result[r] = sum
+        }
+
+        return result
+    }
+
+    /// Matrix-vector multiplication: result = self * vector.
+    ///
+    /// - Parameter vector: Column vector (length must equal cols).
+    /// - Returns: Result vector (length = rows).
+    public func matVecMul(_ vector: [Float]) -> [Float] {
+        precondition(vector.count == cols, "Vector length must equal cols")
+
+        var result = [Float](repeating: 0, count: rows)
+
+        data.withUnsafeBufferPointer { matPtr in
+            vector.withUnsafeBufferPointer { vecPtr in
+                result.withUnsafeMutableBufferPointer { outPtr in
+                    vDSP_mmul(
+                        matPtr.baseAddress!, 1,
+                        vecPtr.baseAddress!, 1,
+                        outPtr.baseAddress!, 1,
+                        vDSP_Length(rows),
+                        1,
+                        vDSP_Length(cols)
+                    )
+                }
+            }
+        }
+
+        return result
+    }
+}
+
+// MARK: - Conversion Extensions
+
+extension Array where Element == [Float] {
+    /// Convert 2D array to contiguous matrix.
+    public func toContiguous() -> ContiguousMatrix {
+        ContiguousMatrix(from: self)
+    }
+}

@@ -66,7 +66,10 @@ public struct Resample: Sendable {
 
     // MARK: - Main Resampling Function
 
-    /// Resample an audio signal to a different sample rate.
+    /// Resample an audio signal to a different sample rate (synchronous version).
+    ///
+    /// This is the preferred version for single-threaded use as it avoids
+    /// async/await overhead for purely CPU-bound computation.
     ///
     /// - Parameters:
     ///   - signal: Input audio signal.
@@ -74,12 +77,12 @@ public struct Resample: Sendable {
     ///   - toSampleRate: Target sample rate in Hz.
     ///   - quality: Resampling quality level.
     /// - Returns: Resampled audio signal.
-    public static func resample(
+    public static func resampleSync(
         _ signal: [Float],
         fromSampleRate: Int,
         toSampleRate: Int,
         quality: ResampleQuality = .medium
-    ) async -> [Float] {
+    ) -> [Float] {
         guard !signal.isEmpty else { return [] }
         guard fromSampleRate != toSampleRate else { return signal }
         guard fromSampleRate > 0 && toSampleRate > 0 else { return signal }
@@ -109,6 +112,28 @@ public struct Resample: Sendable {
             downFactor: downFactor,
             filter: filterCoeffs
         )
+    }
+
+    /// Resample an audio signal to a different sample rate (async version).
+    ///
+    /// Note: This function is marked async for API consistency but performs
+    /// purely synchronous computation. For optimal performance in single-threaded
+    /// contexts, use `resampleSync` instead.
+    ///
+    /// - Parameters:
+    ///   - signal: Input audio signal.
+    ///   - fromSampleRate: Original sample rate in Hz.
+    ///   - toSampleRate: Target sample rate in Hz.
+    ///   - quality: Resampling quality level.
+    /// - Returns: Resampled audio signal.
+    public static func resample(
+        _ signal: [Float],
+        fromSampleRate: Int,
+        toSampleRate: Int,
+        quality: ResampleQuality = .medium
+    ) async -> [Float] {
+        // Delegate to synchronous implementation
+        return resampleSync(signal, fromSampleRate: fromSampleRate, toSampleRate: toSampleRate, quality: quality)
     }
 
     /// Resample using simple linear interpolation (fast but lower quality).
@@ -228,7 +253,38 @@ public struct Resample: Sendable {
 
     // MARK: - Polyphase Resampling
 
-    /// Perform polyphase resampling using fractional delay approach.
+    /// Decompose filter into polyphase components.
+    /// Returns array of (phase -> [tap coefficients]) where phase 0 corresponds to non-zero input samples.
+    private static func decomposePolyphase(
+        filter: [Float],
+        upFactor: Int
+    ) -> [[Float]] {
+        let filterLen = filter.count
+        // Number of taps per phase (ceiling division)
+        let tapsPerPhase = (filterLen + upFactor - 1) / upFactor
+
+        var phases = [[Float]]()
+        phases.reserveCapacity(upFactor)
+
+        for phase in 0..<upFactor {
+            var phaseTaps = [Float]()
+            phaseTaps.reserveCapacity(tapsPerPhase)
+
+            // Collect filter taps for this phase
+            var k = phase
+            while k < filterLen {
+                phaseTaps.append(filter[k])
+                k += upFactor
+            }
+
+            phases.append(phaseTaps)
+        }
+
+        return phases
+    }
+
+    /// Perform polyphase resampling using pre-decomposed filter banks.
+    /// This avoids modulo operations in the inner loop for better performance.
     ///
     /// - Parameters:
     ///   - signal: Input signal.
@@ -247,34 +303,41 @@ public struct Resample: Sendable {
 
         guard outputLength > 0 && inputLength > 0 else { return [] }
 
+        // Pre-decompose filter into polyphase components
+        // This eliminates modulo operations in the hot path
+        let polyphaseFilters = decomposePolyphase(filter: filter, upFactor: upFactor)
+        let filterHalf = filter.count / 2
+
         var output = [Float](repeating: 0, count: outputLength)
-        let filterLen = filter.count
-        let filterHalf = filterLen / 2
 
-        // For each output sample
-        for n in 0..<outputLength {
-            // Position in the upsampled (conceptual) signal
-            let m = n * downFactor
+        // Process each output sample
+        // Use unsafe buffer access for signal to avoid bounds checking overhead
+        signal.withUnsafeBufferPointer { signalPtr in
+            for n in 0..<outputLength {
+                // Position in the upsampled (conceptual) signal
+                let m = n * downFactor
 
-            var sum: Float = 0.0
+                // Determine which phase this output corresponds to
+                // phase = (m + filterHalf) % upFactor, but we can simplify:
+                let offsetM = m + filterHalf
+                let phase = offsetM % upFactor
+                let baseSignalIdx = offsetM / upFactor
 
-            // Convolution: output[n] = sum_k filter[k] * upsampled[m - k + filterHalf]
-            // The upsampled signal is: upsampled[j] = signal[j/L] if j%L==0, else 0
-            for k in 0..<filterLen {
-                // Position in upsampled domain relative to filter center
-                let j = m - k + filterHalf
+                var sum: Float = 0.0
 
-                // upsampled[j] is non-zero only when j % L == 0
-                if j >= 0 && j % upFactor == 0 {
-                    let signalIdx = j / upFactor
+                // Apply only the taps for this phase (no modulo in loop!)
+                let phaseTaps = polyphaseFilters[phase]
+                for (tapIdx, tap) in phaseTaps.enumerated() {
+                    // Signal index for this tap
+                    let signalIdx = baseSignalIdx - tapIdx
                     if signalIdx >= 0 && signalIdx < inputLength {
-                        sum += signal[signalIdx] * filter[k]
+                        sum += signalPtr[signalIdx] * tap
                     }
                 }
-            }
 
-            // Scale by upFactor to compensate for zero-insertion
-            output[n] = sum * Float(upFactor)
+                // Scale by upFactor to compensate for zero-insertion
+                output[n] = sum * Float(upFactor)
+            }
         }
 
         return output
@@ -309,6 +372,26 @@ public struct Resample: Sendable {
 // MARK: - Convenience Extensions
 
 extension Resample {
+    /// Convenience method with alternative parameter names (Int version, sync).
+    public static func resampleSync(
+        _ signal: [Float],
+        fromRate: Int,
+        toRate: Int,
+        quality: ResampleQuality = .medium
+    ) -> [Float] {
+        return resampleSync(signal, fromSampleRate: fromRate, toSampleRate: toRate, quality: quality)
+    }
+
+    /// Convenience method with alternative parameter names (Float version, sync).
+    public static func resampleSync(
+        _ signal: [Float],
+        fromRate: Float,
+        toRate: Float,
+        quality: ResampleQuality = .medium
+    ) -> [Float] {
+        return resampleSync(signal, fromSampleRate: Int(fromRate), toSampleRate: Int(toRate), quality: quality)
+    }
+
     /// Convenience method with alternative parameter names (Int version).
     ///
     /// - Parameters:
@@ -323,7 +406,7 @@ extension Resample {
         toRate: Int,
         quality: ResampleQuality = .medium
     ) async -> [Float] {
-        return await resample(signal, fromSampleRate: fromRate, toSampleRate: toRate, quality: quality)
+        return resampleSync(signal, fromSampleRate: fromRate, toSampleRate: toRate, quality: quality)
     }
 
     /// Convenience method with alternative parameter names (Float version).
@@ -340,7 +423,7 @@ extension Resample {
         toRate: Float,
         quality: ResampleQuality = .medium
     ) async -> [Float] {
-        return await resample(signal, fromSampleRate: Int(fromRate), toSampleRate: Int(toRate), quality: quality)
+        return resampleSync(signal, fromSampleRate: Int(fromRate), toSampleRate: Int(toRate), quality: quality)
     }
 
     /// Common resampling presets.
@@ -372,6 +455,21 @@ extension Resample {
         }
     }
 
+    /// Resample using a preset configuration (synchronous version).
+    public static func resampleSync(
+        _ signal: [Float],
+        preset: Preset,
+        quality: ResampleQuality = .medium
+    ) -> [Float] {
+        let rates = preset.rates
+        return resampleSync(
+            signal,
+            fromSampleRate: rates.from,
+            toSampleRate: rates.to,
+            quality: quality
+        )
+    }
+
     /// Resample using a preset configuration.
     ///
     /// - Parameters:
@@ -386,7 +484,7 @@ extension Resample {
         quality: ResampleQuality = .medium
     ) async -> [Float] {
         let rates = preset.rates
-        return await resample(
+        return resampleSync(
             signal,
             fromSampleRate: rates.from,
             toSampleRate: rates.to,

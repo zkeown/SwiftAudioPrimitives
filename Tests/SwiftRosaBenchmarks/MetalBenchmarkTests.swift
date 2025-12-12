@@ -1,8 +1,8 @@
 import Accelerate
 import XCTest
 
+@testable import SwiftRosaCore
 @testable import SwiftRosaML
-import SwiftRosaCore
 
 /// Benchmark tests comparing Metal GPU vs CPU performance.
 final class MetalBenchmarkTests: XCTestCase {

@@ -3,9 +3,9 @@ import Foundation
 
 /// Padding mode for signal centering.
 public enum PadMode: Sendable {
-    /// Reflect signal at boundaries (default, matches librosa).
+    /// Reflect signal at boundaries.
     case reflect
-    /// Pad with constant value.
+    /// Pad with constant value (default, matches librosa's default).
     case constant(Float)
     /// Pad with edge values.
     case edge
@@ -39,14 +39,14 @@ public struct STFTConfig: Sendable {
     ///   - winLength: Window length (default: nFFT).
     ///   - windowType: Window function (default: hann).
     ///   - center: Pad signal for centered frames (default: true).
-    ///   - padMode: Padding mode (default: reflect).
+    ///   - padMode: Padding mode (default: constant(0), matching librosa).
     public init(
         nFFT: Int = 2048,
         hopLength: Int? = nil,
         winLength: Int? = nil,
         windowType: WindowType = .hann,
         center: Bool = true,
-        padMode: PadMode = .reflect
+        padMode: PadMode = .constant(0)
     ) {
         self.nFFT = nFFT
         self.hopLength = hopLength ?? (nFFT / 4)
@@ -131,8 +131,13 @@ public struct STFT: Sendable {
     public func transform(_ signal: [Float]) async -> ComplexMatrix {
         let paddedSignal = config.center ? padSignal(signal) : signal
 
-        let frames = frameSignal(paddedSignal)
-        let nFrames = frames.count
+        // Get frame start indices instead of copying frames
+        let indices = frameIndices(paddedSignal.count)
+        let nFrames = indices.count
+
+        guard nFrames > 0 else {
+            return ComplexMatrix(real: [], imag: [])
+        }
 
         // Create workspace once for all frames (major optimization)
         let workspace = STFTWorkspace(nFFT: config.nFFT)
@@ -150,23 +155,28 @@ public struct STFT: Sendable {
         }
 
         // Process each frame with reusable workspace
-        for (frameIdx, frame) in frames.enumerated() {
-            // Apply window using workspace buffer
-            // Zero out the windowed frame buffer first
-            workspace.windowedFrame.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
+        // Access signal directly via indices to avoid frame copies
+        paddedSignal.withUnsafeBufferPointer { signalPtr in
+            for (frameIdx, startIdx) in indices.enumerated() {
+                // Zero out the windowed frame buffer first
+                workspace.windowedFrame.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
 
-            // Copy and window the frame (zero-pad if winLength < nFFT)
-            for i in 0..<min(frame.count, config.winLength) {
-                workspace.windowedFrame[i] = frame[i] * window[i]
-            }
+                // Window directly from signal (no intermediate copy)
+                let frameEnd = min(startIdx + config.winLength, paddedSignal.count)
+                let availableSamples = frameEnd - startIdx
 
-            // Compute FFT using workspace buffers
-            computeFFTWithWorkspace(workspace)
+                for i in 0..<min(availableSamples, config.winLength) {
+                    workspace.windowedFrame[i] = signalPtr[startIdx + i] * window[i]
+                }
 
-            // Store results (only positive frequencies)
-            for freqIdx in 0..<config.nFreqs {
-                realResult[freqIdx][frameIdx] = workspace.fftReal[freqIdx]
-                imagResult[freqIdx][frameIdx] = workspace.fftImag[freqIdx]
+                // Compute FFT using workspace buffers
+                computeFFTWithWorkspace(workspace)
+
+                // Store results (only positive frequencies)
+                for freqIdx in 0..<config.nFreqs {
+                    realResult[freqIdx][frameIdx] = workspace.fftReal[freqIdx]
+                    imagResult[freqIdx][frameIdx] = workspace.fftImag[freqIdx]
+                }
             }
         }
 
@@ -188,14 +198,22 @@ public struct STFT: Sendable {
     /// - Returns: Power spectrogram of shape (nFreqs, nFrames).
     public func power(_ signal: [Float]) async -> [[Float]] {
         let spectrogram = await transform(signal)
-        let mag = spectrogram.magnitude
 
-        // Square the magnitude
-        return mag.map { row in
-            var squared = [Float](repeating: 0, count: row.count)
-            vDSP_vsq(row, 1, &squared, 1, vDSP_Length(row.count))
-            return squared
+        // Compute power directly from real/imag as r² + i² (avoids sqrt precision loss)
+        var result = [[Float]]()
+        result.reserveCapacity(spectrogram.rows)
+
+        for f in 0..<spectrogram.rows {
+            var powerRow = [Float](repeating: 0, count: spectrogram.cols)
+            for t in 0..<spectrogram.cols {
+                let r = spectrogram.real[f][t]
+                let i = spectrogram.imag[f][t]
+                powerRow[t] = r * r + i * i
+            }
+            result.append(powerRow)
         }
+
+        return result
     }
 
     // MARK: - Private Implementation
@@ -240,6 +258,23 @@ public struct STFT: Sendable {
         return result
     }
 
+    /// Frame the signal into overlapping frames.
+    /// Returns frame start indices to avoid copying data.
+    private func frameIndices(_ signalLength: Int) -> [Int] {
+        guard signalLength >= config.nFFT else { return [] }
+        let nFrames = 1 + (signalLength - config.nFFT) / config.hopLength
+        var indices = [Int]()
+        indices.reserveCapacity(nFrames)
+
+        for i in 0..<nFrames {
+            indices.append(i * config.hopLength)
+        }
+
+        return indices
+    }
+
+    /// Legacy frame extraction - still needed for compatibility.
+    /// Consider using frameIndices + direct signal access for better performance.
     private func frameSignal(_ signal: [Float]) -> [[Float]] {
         guard signal.count >= config.nFFT else { return [] }
         let nFrames = 1 + (signal.count - config.nFFT) / config.hopLength
@@ -322,5 +357,178 @@ public struct STFT: Sendable {
         workspace.windowedFrame = input
         computeFFTWithWorkspace(workspace)
         return (workspace.fftReal, workspace.fftImag)
+    }
+
+    // MARK: - Contiguous Output Methods
+
+    /// Compute STFT with contiguous output format.
+    ///
+    /// This method outputs directly to contiguous memory layout, avoiding
+    /// the intermediate [[Float]] allocations. Preferred for performance-critical
+    /// code paths.
+    ///
+    /// - Parameter signal: Input audio signal.
+    /// - Returns: Complex spectrogram in contiguous format.
+    public func transformContiguous(_ signal: [Float]) async -> ContiguousComplexMatrix {
+        let paddedSignal = config.center ? padSignal(signal) : signal
+        let indices = frameIndices(paddedSignal.count)
+        let nFrames = indices.count
+
+        guard nFrames > 0 else {
+            return ContiguousComplexMatrix(rows: 0, cols: 0)
+        }
+
+        let nFreqs = config.nFreqs
+        let workspace = STFTWorkspace(nFFT: config.nFFT)
+
+        // Single allocation for output (row-major: freq × frames)
+        var realData = [Float](repeating: 0, count: nFreqs * nFrames)
+        var imagData = [Float](repeating: 0, count: nFreqs * nFrames)
+
+        paddedSignal.withUnsafeBufferPointer { signalPtr in
+            realData.withUnsafeMutableBufferPointer { realPtr in
+                imagData.withUnsafeMutableBufferPointer { imagPtr in
+                    for (frameIdx, startIdx) in indices.enumerated() {
+                        // Zero windowed frame buffer
+                        workspace.windowedFrame.withUnsafeMutableBytes {
+                            memset($0.baseAddress!, 0, $0.count)
+                        }
+
+                        // Window directly from signal
+                        let frameEnd = min(startIdx + config.winLength, paddedSignal.count)
+                        let availableSamples = frameEnd - startIdx
+
+                        for i in 0..<min(availableSamples, config.winLength) {
+                            workspace.windowedFrame[i] = signalPtr[startIdx + i] * window[i]
+                        }
+
+                        // Compute FFT
+                        computeFFTWithWorkspace(workspace)
+
+                        // Store results in row-major order (row = freq, col = frame)
+                        for freqIdx in 0..<nFreqs {
+                            let idx = freqIdx * nFrames + frameIdx
+                            realPtr[idx] = workspace.fftReal[freqIdx]
+                            imagPtr[idx] = workspace.fftImag[freqIdx]
+                        }
+                    }
+                }
+            }
+        }
+
+        return ContiguousComplexMatrix(real: realData, imag: imagData, rows: nFreqs, cols: nFrames)
+    }
+
+    /// Compute magnitude spectrogram with contiguous output.
+    ///
+    /// This method computes magnitude directly in contiguous memory,
+    /// avoiding both [[Float]] and intermediate complex storage.
+    ///
+    /// - Parameter signal: Input audio signal.
+    /// - Returns: Magnitude spectrogram in contiguous format.
+    public func magnitudeContiguous(_ signal: [Float]) async -> ContiguousMatrix {
+        let paddedSignal = config.center ? padSignal(signal) : signal
+        let indices = frameIndices(paddedSignal.count)
+        let nFrames = indices.count
+
+        guard nFrames > 0 else {
+            return ContiguousMatrix(rows: 0, cols: 0)
+        }
+
+        let nFreqs = config.nFreqs
+        let workspace = STFTWorkspace(nFFT: config.nFFT)
+
+        // Single allocation for magnitude output
+        var magData = [Float](repeating: 0, count: nFreqs * nFrames)
+
+        paddedSignal.withUnsafeBufferPointer { signalPtr in
+            magData.withUnsafeMutableBufferPointer { magPtr in
+                for (frameIdx, startIdx) in indices.enumerated() {
+                    // Zero windowed frame buffer
+                    workspace.windowedFrame.withUnsafeMutableBytes {
+                        memset($0.baseAddress!, 0, $0.count)
+                    }
+
+                    // Window directly from signal
+                    let frameEnd = min(startIdx + config.winLength, paddedSignal.count)
+                    let availableSamples = frameEnd - startIdx
+
+                    for i in 0..<min(availableSamples, config.winLength) {
+                        workspace.windowedFrame[i] = signalPtr[startIdx + i] * window[i]
+                    }
+
+                    // Compute FFT
+                    computeFFTWithWorkspace(workspace)
+
+                    // Compute magnitude and store in row-major order
+                    workspace.fftReal.withUnsafeBufferPointer { realPtr in
+                        workspace.fftImag.withUnsafeBufferPointer { imagPtr in
+                            for freqIdx in 0..<nFreqs {
+                                let r = realPtr[freqIdx]
+                                let i = imagPtr[freqIdx]
+                                magPtr[freqIdx * nFrames + frameIdx] = sqrtf(r * r + i * i)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return ContiguousMatrix(data: magData, rows: nFreqs, cols: nFrames)
+    }
+
+    /// Compute power spectrogram with contiguous output.
+    ///
+    /// - Parameter signal: Input audio signal.
+    /// - Returns: Power spectrogram (magnitude squared) in contiguous format.
+    public func powerContiguous(_ signal: [Float]) async -> ContiguousMatrix {
+        let paddedSignal = config.center ? padSignal(signal) : signal
+        let indices = frameIndices(paddedSignal.count)
+        let nFrames = indices.count
+
+        guard nFrames > 0 else {
+            return ContiguousMatrix(rows: 0, cols: 0)
+        }
+
+        let nFreqs = config.nFreqs
+        let workspace = STFTWorkspace(nFFT: config.nFFT)
+
+        // Single allocation for power output
+        var powerData = [Float](repeating: 0, count: nFreqs * nFrames)
+
+        paddedSignal.withUnsafeBufferPointer { signalPtr in
+            powerData.withUnsafeMutableBufferPointer { powerPtr in
+                for (frameIdx, startIdx) in indices.enumerated() {
+                    // Zero windowed frame buffer
+                    workspace.windowedFrame.withUnsafeMutableBytes {
+                        memset($0.baseAddress!, 0, $0.count)
+                    }
+
+                    // Window directly from signal
+                    let frameEnd = min(startIdx + config.winLength, paddedSignal.count)
+                    let availableSamples = frameEnd - startIdx
+
+                    for i in 0..<min(availableSamples, config.winLength) {
+                        workspace.windowedFrame[i] = signalPtr[startIdx + i] * window[i]
+                    }
+
+                    // Compute FFT
+                    computeFFTWithWorkspace(workspace)
+
+                    // Compute power (mag^2) and store in row-major order
+                    workspace.fftReal.withUnsafeBufferPointer { realPtr in
+                        workspace.fftImag.withUnsafeBufferPointer { imagPtr in
+                            for freqIdx in 0..<nFreqs {
+                                let r = realPtr[freqIdx]
+                                let i = imagPtr[freqIdx]
+                                powerPtr[freqIdx * nFrames + frameIdx] = r * r + i * i
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return ContiguousMatrix(data: powerData, rows: nFreqs, cols: nFrames)
     }
 }

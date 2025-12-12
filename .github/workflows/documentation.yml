@@ -1,0 +1,72 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build-documentation:
+    name: Build Documentation
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '5.9'
+
+      - name: Build Documentation
+        run: |
+          # Build documentation for all targets
+          swift package generate-documentation \
+            --output-path ./docs \
+            --transform-for-static-hosting \
+            --hosting-base-path SwiftRosa
+
+      - name: Create index redirect
+        run: |
+          # Create an index.html that redirects to the umbrella documentation
+          cat > ./docs/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta http-equiv="refresh" content="0; url=documentation/swiftrosa/">
+            <title>SwiftRosa Documentation</title>
+          </head>
+          <body>
+            <p>Redirecting to <a href="documentation/swiftrosa/">SwiftRosa documentation</a>...</p>
+          </body>
+          </html>
+          EOF
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./docs
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build-documentation
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -359,7 +359,7 @@ final class GPUCPUParityTests: XCTestCase {
 
         // Generate longer signal to ensure GPU threshold is exceeded
         let sampleRate: Float = 22050
-        let duration: Float = 5.0  // 5 seconds
+        let duration: Float = 2.0  // 2 seconds (still exceeds GPU threshold)
         let nSamples = Int(sampleRate * duration)
 
         var signal = [Float](repeating: 0, count: nSamples)

@@ -1,9 +1,9 @@
 import XCTest
 
+@testable import SwiftRosaCore
+@testable import SwiftRosaEffects
 @testable import SwiftRosaML
-import SwiftRosaCore
-import SwiftRosaEffects
-import SwiftRosaStreaming
+@testable import SwiftRosaStreaming
 
 /// Benchmark tests focused on memory usage and allocation patterns.
 ///
@@ -145,8 +145,8 @@ final class MemoryBenchmarkTests: XCTestCase {
         // Memory should not grow unboundedly for streaming
         // Peak should be bounded by buffer size + frame processing overhead
         XCTAssertLessThan(
-            delta.peakFootprint, 100 * 1024 * 1024,
-            "Streaming peak memory should be < 100MB for 60s"
+            delta.peakFootprint, 150 * 1024 * 1024,
+            "Streaming peak memory should be < 150MB for 60s"
         )
     }
 

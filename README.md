@@ -1,19 +1,35 @@
-# SwiftAudioPrimitives
+# SwiftRosa
 
-Librosa-compatible audio DSP primitives for iOS, enabling ML audio applications like music source separation on iPhone/iPad.
+[![Swift 5.9](https://img.shields.io/badge/Swift-5.9+-orange.svg)](https://swift.org)
+[![iOS 16+](https://img.shields.io/badge/iOS-16+-blue.svg)](https://developer.apple.com/ios/)
+[![macOS 13+](https://img.shields.io/badge/macOS-13+-blue.svg)](https://developer.apple.com/macos/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![CI](https://github.com/zkeown/SwiftRosa/actions/workflows/validation.yml/badge.svg)](https://github.com/zkeown/SwiftRosa/actions)
 
-## Features
+**Modular Swift/Metal port of [librosa](https://librosa.org/) for iOS and macOS.**
 
-- **STFT/ISTFT** - Short-time Fourier transform with configurable windows
-- **Mel Spectrograms** - Mel filterbank and mel spectrogram computation
-- **Window Functions** - Hann, Hamming, Blackman, Bartlett, rectangular
-- **dB Conversion** - Power/amplitude to dB and back
-- **Accelerate-powered** - Uses vDSP for optimized FFT operations
+SwiftRosa brings production-grade audio DSP to Apple platforms with GPU acceleration via Metal, enabling ML audio applications like music source separation on iPhone and iPad.
 
-## Requirements
+## Package Architecture
 
-- iOS 16.0+ / macOS 13.0+
-- Swift 5.9+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        SwiftRosa                            │  Umbrella
+├─────────────────────────────────────────────────────────────┤
+│                       SwiftRosaML                           │  Tier 3
+│            CoreML integration, source separation            │
+├─────────────────────────────────────────────────────────────┤
+│                    SwiftRosaStreaming                       │  Tier 2.5
+│                   Real-time processing                      │
+├───────────────────┬───────────────────┬─────────────────────┤
+│ SwiftRosaAnalysis │  SwiftRosaEffects │    SwiftRosaNN      │  Tier 2
+│  Onset, Pitch,    │  CQT, MFCC,       │  LSTM, BiLSTM       │
+│  Rhythm, VAD      │  Chromagram, DTW  │  Metal-accelerated  │
+├───────────────────┴───────────────────┴─────────────────────┤
+│                      SwiftRosaCore                          │  Tier 1
+│     STFT, ISTFT, Mel spectrograms, Windows, Metal engine    │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Installation
 
@@ -23,144 +39,193 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/zakkeown/SwiftAudioPrimitives.git", from: "0.1.0")
+    .package(url: "https://github.com/zkeown/SwiftRosa.git", from: "1.0.0")
 ]
 ```
 
-Or in Xcode: File → Add Package Dependencies → Enter the repository URL.
+**Import options:**
+
+```swift
+// Import everything
+import SwiftRosa
+
+// Or import individual packages for smaller binaries
+import SwiftRosaCore      // Just DSP primitives
+import SwiftRosaEffects   // Add transforms like CQT, MFCC
+import SwiftRosaML        // Add CoreML integration
+```
 
 ## Quick Start
 
 ```swift
-import SwiftAudioPrimitives
+import SwiftRosa
 
-// Load your audio signal as [Float]
-let audioSignal: [Float] = ...
+// Load audio as [Float] (use SwiftRosaML's AudioFileIO for file loading)
+let audio: [Float] = ...
 
 // Compute STFT
 let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
-let spectrogram = await stft.transform(audioSignal)
-
-// Get magnitude spectrogram
-let magnitude = spectrogram.magnitude
+let spectrogram = await stft.transform(audio)
 
 // Compute mel spectrogram
 let melSpec = MelSpectrogram(sampleRate: 22050, nMels: 128)
-let melFeatures = await melSpec.transform(audioSignal)
+let melFeatures = await melSpec.transform(audio)
 
 // Convert to dB scale
 let melDb = Convert.powerToDb(melFeatures)
 
-// Reconstruct audio from spectrogram (ISTFT)
-let istft = stft.inverse
-let reconstructed = await istft.transform(spectrogram, length: audioSignal.count)
+// Reconstruct audio with ISTFT
+let reconstructed = await stft.inverse.transform(spectrogram, length: audio.count)
 ```
 
-## API Reference
+## Packages
 
-### STFT
+### SwiftRosaCore
+
+Foundation DSP primitives with Metal GPU acceleration.
+
+| Component | Description |
+|-----------|-------------|
+| `STFT` / `ISTFT` | Short-time Fourier transform with configurable windows |
+| `MelSpectrogram` | Mel filterbank and mel spectrogram computation |
+| `MelFilterbank` | Standalone mel filter generation |
+| `Windows` | Hann, Hamming, Blackman, Bartlett, rectangular |
+| `Convert` | Power/amplitude to dB and back |
+| `MetalEngine` | GPU acceleration for large transforms |
+
+### SwiftRosaAnalysis
+
+Audio analysis algorithms.
+
+| Component | Description |
+|-----------|-------------|
+| `OnsetDetector` | Onset strength and peak picking |
+| `PitchDetector` | Fundamental frequency estimation |
+| `VAD` | Voice activity detection (energy, spectral, combined) |
+| Rhythm | Beat tracking and tempo estimation |
+
+### SwiftRosaEffects
+
+Advanced transforms and effects.
+
+| Component | Description |
+|-----------|-------------|
+| `CQT` / `VQT` | Constant-Q and Variable-Q transforms |
+| `MFCC` | Mel-frequency cepstral coefficients |
+| `Chromagram` | Pitch class profiles |
+| `Tonnetz` | Tonal centroid features |
+| `Resample` | High-quality resampling |
+| `HPSS` | Harmonic-percussive source separation |
+| `GriffinLim` | Phase reconstruction |
+| `DTW` | Dynamic time warping |
+
+### SwiftRosaStreaming
+
+Real-time audio processing with ring buffer architecture.
+
+| Component | Description |
+|-----------|-------------|
+| `StreamingSTFT` | Frame-by-frame STFT |
+| `StreamingISTFT` | Overlap-add reconstruction |
+| `StreamingMel` | Real-time mel spectrograms |
+| `StreamingMFCC` | Real-time MFCC extraction |
+| `StreamingPitchDetector` | Continuous pitch tracking |
+
+### SwiftRosaML
+
+Machine learning integration.
+
+| Component | Description |
+|-----------|-------------|
+| `SourceSeparationPipeline` | End-to-end source separation |
+| `AudioFileIO` | Audio file reading/writing |
+| `AudioEngineCapture` | Live audio capture |
+| `SpecAugment` | Spectrogram augmentation |
+| `BenchmarkRunner` | Performance profiling |
+
+### SwiftRosaNN
+
+Neural network primitives with Metal acceleration.
+
+| Component | Description |
+|-----------|-------------|
+| `LSTMLayer` | LSTM recurrent layer |
+| `BiLSTMLayer` | Bidirectional LSTM |
+| `LSTMEngine` | Metal GPU acceleration |
+| `WeightLoader` | Model weight utilities |
+
+## Performance
+
+SwiftRosa uses Apple's Accelerate framework (vDSP) for CPU operations and Metal for GPU acceleration.
+
+**When GPU acceleration helps:**
+- Large FFT sizes (>4096)
+- Batch processing many frames
+- LSTM inference with large hidden sizes
+
+**CPU is often faster for:**
+- Small transforms
+- Single-frame processing
+- Low-latency streaming
+
+Most components accept a `useGPU` parameter:
 
 ```swift
-let config = STFTConfig(
-    nFFT: 2048,           // FFT size
-    hopLength: 512,       // Hop between frames
-    winLength: nil,       // Window length (default: nFFT)
-    windowType: .hann,    // Window function
-    center: true,         // Pad signal for centered frames
-    padMode: .reflect     // Padding mode
-)
-
-let stft = STFT(config: config)
-let spectrogram = await stft.transform(signal)  // ComplexMatrix
-let magnitude = await stft.magnitude(signal)     // [[Float]]
-let power = await stft.power(signal)             // [[Float]]
-```
-
-### ISTFT
-
-```swift
-let istft = ISTFT(config: config)
-let reconstructed = await istft.transform(spectrogram, length: originalLength)
-
-// Or use the convenience property:
-let reconstructed = await stft.inverse.transform(spectrogram)
-```
-
-### Mel Spectrogram
-
-```swift
-let melSpec = MelSpectrogram(
-    sampleRate: 22050,
-    nFFT: 2048,
-    hopLength: 512,
-    nMels: 128,
-    fMin: 0,
-    fMax: 8000,
-    htk: false,          // Use Slaney formula (librosa default)
-    norm: .slaney        // Slaney normalization
-)
-
-let mel = await melSpec.transform(signal)
-```
-
-### dB Conversion
-
-```swift
-// Power to dB
-let db = Convert.powerToDb(powerSpec, ref: 1.0, amin: 1e-10, topDb: 80.0)
-
-// Amplitude to dB
-let db = Convert.amplitudeToDb(magSpec, ref: 1.0, amin: 1e-5, topDb: 80.0)
-
-// dB to power/amplitude
-let power = Convert.dbToPower(db, ref: 1.0)
-let amplitude = Convert.dbToAmplitude(db, ref: 1.0)
-```
-
-### Window Functions
-
-```swift
-let window = Windows.generate(.hann, length: 2048, periodic: true)
-
-// Available types: .hann, .hamming, .blackman, .bartlett, .rectangular
+let melSpec = MelSpectrogram(sampleRate: 22050, nMels: 128, useGPU: true)
+let istft = ISTFT(config: config, useGPU: true)
 ```
 
 ## Librosa Compatibility
 
-This library is designed to produce outputs compatible with [librosa](https://librosa.org/). Key compatibility notes:
+SwiftRosa is designed to produce outputs compatible with [librosa](https://librosa.org/):
 
 - Default parameters match librosa defaults
-- Mel filterbank uses Slaney formula by default (not HTK)
-- STFT uses centered frames with reflect padding by default
-- All outputs use Float32 precision
-
-## Performance
-
-- Uses Apple's Accelerate framework (vDSP) for FFT operations
-- Async/await for non-blocking computation
-- Sendable types for safe concurrent use
+- Mel filterbank uses Slaney formula (not HTK) by default
+- STFT uses centered frames with reflect padding
+- Reference validation tests ensure numerical compatibility
 
 ## Use Case: Music Source Separation
 
-This library was designed to enable running ML audio models like [Banquet/query-bandit](https://github.com/Banquet/query-bandit) on iOS:
-
 ```swift
+import SwiftRosa
+
 // 1. Load audio
-let audio = loadAudioFile(url)
+let audio = try await AudioFileIO.load(url: audioURL)
 
-// 2. Compute STFT
+// 2. Compute spectrogram
 let stft = STFT(config: STFTConfig(nFFT: 4096, hopLength: 1024))
-let spectrogram = await stft.transform(audio)
+let spectrogram = await stft.transform(audio.samples)
 
-// 3. Run Core ML model (converts spectrogram to separated sources)
-let model = try MLModel(contentsOf: modelURL)
-let separated = try await model.prediction(input: spectrogram)
+// 3. Run source separation model
+let pipeline = try SourceSeparationPipeline(modelURL: modelURL)
+let separated = try await pipeline.separate(spectrogram)
 
-// 4. Reconstruct audio with ISTFT
-let vocals = await stft.inverse.transform(separated.vocals, length: audio.count)
-let drums = await stft.inverse.transform(separated.drums, length: audio.count)
+// 4. Reconstruct separated sources
+let vocals = await stft.inverse.transform(separated.vocals, length: audio.samples.count)
+let drums = await stft.inverse.transform(separated.drums, length: audio.samples.count)
+
+// 5. Save outputs
+try await AudioFileIO.save(vocals, to: vocalsURL, sampleRate: audio.sampleRate)
 ```
+
+## Documentation
+
+Full API documentation is available via DocC. Build locally with:
+
+```bash
+swift package generate-documentation --target SwiftRosa
+```
+
+Or browse individual package documentation:
+
+```bash
+swift package generate-documentation --target SwiftRosaCore
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and PR guidelines.
 
 ## License
 
-MIT
+MIT - See [LICENSE](LICENSE) for details.

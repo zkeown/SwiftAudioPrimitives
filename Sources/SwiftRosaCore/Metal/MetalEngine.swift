@@ -506,6 +506,366 @@ public actor MetalEngine {
 
         return (resultReal, resultImag)
     }
+
+    // MARK: - Spectral Features
+
+    /// Compute spectral centroid using GPU.
+    ///
+    /// - Parameters:
+    ///   - magnitudeSpec: Magnitude spectrogram of shape (nFreqs, nFrames).
+    ///   - frequencies: Frequency array of length nFreqs.
+    /// - Returns: Spectral centroid per frame.
+    public func spectralCentroid(
+        magnitudeSpec: [[Float]],
+        frequencies: [Float]
+    ) async throws -> [Float] {
+        guard !magnitudeSpec.isEmpty && !magnitudeSpec[0].isEmpty else { return [] }
+
+        let nFreqs = magnitudeSpec.count
+        let nFrames = magnitudeSpec[0].count
+
+        // Flatten magnitude spectrogram (freq-major layout)
+        let flatMag = magnitudeSpec.flatMap { $0 }
+
+        let magBytes = flatMag.count * MemoryLayout<Float>.size
+        let freqBytes = frequencies.count * MemoryLayout<Float>.size
+        let outputBytes = nFrames * MemoryLayout<Float>.size
+
+        // Acquire buffers from pool
+        guard let magBuffer = bufferPool.acquire(minBytes: magBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer { bufferPool.release(magBuffer) }
+
+        guard let freqBuffer = bufferPool.acquire(minBytes: freqBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer { bufferPool.release(freqBuffer) }
+
+        guard let outputBuffer = bufferPool.acquire(minBytes: outputBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer { bufferPool.release(outputBuffer) }
+
+        // Copy data to buffers
+        memcpy(magBuffer.contents(), flatMag, magBytes)
+        memcpy(freqBuffer.contents(), frequencies, freqBytes)
+
+        // Constants
+        var nFreqsVar = UInt32(nFreqs)
+        var nFramesVar = UInt32(nFrames)
+
+        // Get pipeline
+        let pipeline = try getPipeline(for: "spectralCentroid")
+
+        // Create command buffer
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalEngineError.commandBufferFailed
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(magBuffer, offset: 0, index: 0)
+        encoder.setBuffer(freqBuffer, offset: 0, index: 1)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 2)
+        encoder.setBytes(&nFreqsVar, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&nFramesVar, length: MemoryLayout<UInt32>.size, index: 4)
+
+        // Dispatch 1D grid (one thread per frame)
+        let threadsPerGroup = MTLSize(width: min(256, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+        let threadGroups = MTLSize(width: (nFrames + threadsPerGroup.width - 1) / threadsPerGroup.width, height: 1, depth: 1)
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        // Read results
+        let outputPtr = outputBuffer.contents().assumingMemoryBound(to: Float.self)
+        return Array(UnsafeBufferPointer(start: outputPtr, count: nFrames))
+    }
+
+    /// Compute spectral flux using GPU.
+    ///
+    /// - Parameter magnitudeSpec: Magnitude spectrogram of shape (nFreqs, nFrames).
+    /// - Returns: Spectral flux per frame.
+    public func spectralFlux(
+        magnitudeSpec: [[Float]]
+    ) async throws -> [Float] {
+        guard !magnitudeSpec.isEmpty && !magnitudeSpec[0].isEmpty else { return [] }
+
+        let nFreqs = magnitudeSpec.count
+        let nFrames = magnitudeSpec[0].count
+
+        // Flatten magnitude spectrogram (freq-major layout)
+        let flatMag = magnitudeSpec.flatMap { $0 }
+
+        let magBytes = flatMag.count * MemoryLayout<Float>.size
+        let outputBytes = nFrames * MemoryLayout<Float>.size
+
+        // Acquire buffers from pool
+        guard let magBuffer = bufferPool.acquire(minBytes: magBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer { bufferPool.release(magBuffer) }
+
+        guard let outputBuffer = bufferPool.acquire(minBytes: outputBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer { bufferPool.release(outputBuffer) }
+
+        // Copy data to buffer
+        memcpy(magBuffer.contents(), flatMag, magBytes)
+
+        // Constants
+        var nFreqsVar = UInt32(nFreqs)
+        var nFramesVar = UInt32(nFrames)
+
+        // Get pipeline
+        let pipeline = try getPipeline(for: "spectralFlux")
+
+        // Create command buffer
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalEngineError.commandBufferFailed
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(magBuffer, offset: 0, index: 0)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        encoder.setBytes(&nFreqsVar, length: MemoryLayout<UInt32>.size, index: 2)
+        encoder.setBytes(&nFramesVar, length: MemoryLayout<UInt32>.size, index: 3)
+
+        // Dispatch 1D grid (one thread per frame)
+        let threadsPerGroup = MTLSize(width: min(256, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+        let threadGroups = MTLSize(width: (nFrames + threadsPerGroup.width - 1) / threadsPerGroup.width, height: 1, depth: 1)
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        // Read results
+        let outputPtr = outputBuffer.contents().assumingMemoryBound(to: Float.self)
+        return Array(UnsafeBufferPointer(start: outputPtr, count: nFrames))
+    }
+
+    // MARK: - GPU FFT
+
+    /// Compute batch FFT using GPU.
+    ///
+    /// Performs radix-2 DIT FFT on multiple signals in parallel.
+    /// Input must have power-of-2 length.
+    ///
+    /// - Parameters:
+    ///   - real: Real parts, flat array [batchSize * n].
+    ///   - imag: Imaginary parts, flat array [batchSize * n].
+    ///   - n: FFT size (must be power of 2).
+    ///   - batchSize: Number of independent FFTs.
+    /// - Returns: Tuple of (real, imag) result arrays.
+    public func batchFFT(
+        real: [Float],
+        imag: [Float],
+        n: Int,
+        batchSize: Int
+    ) async throws -> (real: [Float], imag: [Float]) {
+        guard n > 0 && (n & (n - 1)) == 0 else {
+            // n must be power of 2
+            throw MetalEngineError.encodingFailed
+        }
+
+        let log2n = Int(log2(Double(n)))
+        let totalElements = n * batchSize
+        let bufferBytes = totalElements * MemoryLayout<Float>.size
+
+        // Acquire buffers for input, working space, and output
+        guard let inputRealBuffer = bufferPool.acquire(minBytes: bufferBytes),
+              let inputImagBuffer = bufferPool.acquire(minBytes: bufferBytes),
+              let workRealBuffer = bufferPool.acquire(minBytes: bufferBytes),
+              let workImagBuffer = bufferPool.acquire(minBytes: bufferBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer {
+            bufferPool.release(inputRealBuffer)
+            bufferPool.release(inputImagBuffer)
+            bufferPool.release(workRealBuffer)
+            bufferPool.release(workImagBuffer)
+        }
+
+        // Copy input data
+        memcpy(inputRealBuffer.contents(), real, bufferBytes)
+        memcpy(inputImagBuffer.contents(), imag, bufferBytes)
+
+        // Get pipelines
+        let bitReversePipeline = try getPipeline(for: "fftBatchBitReverse")
+        let butterflyPipeline = try getPipeline(for: "fftBatchButterflyStage")
+
+        // Create command buffer
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw MetalEngineError.commandBufferFailed
+        }
+
+        // Step 1: Bit-reversal permutation
+        guard let bitReverseEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalEngineError.encodingFailed
+        }
+
+        var nVar = UInt32(n)
+        var log2nVar = UInt32(log2n)
+        var batchSizeVar = UInt32(batchSize)
+
+        bitReverseEncoder.setComputePipelineState(bitReversePipeline)
+        bitReverseEncoder.setBuffer(inputRealBuffer, offset: 0, index: 0)
+        bitReverseEncoder.setBuffer(inputImagBuffer, offset: 0, index: 1)
+        bitReverseEncoder.setBuffer(workRealBuffer, offset: 0, index: 2)
+        bitReverseEncoder.setBuffer(workImagBuffer, offset: 0, index: 3)
+        bitReverseEncoder.setBytes(&nVar, length: MemoryLayout<UInt32>.size, index: 4)
+        bitReverseEncoder.setBytes(&log2nVar, length: MemoryLayout<UInt32>.size, index: 5)
+        bitReverseEncoder.setBytes(&batchSizeVar, length: MemoryLayout<UInt32>.size, index: 6)
+
+        let threadsPerGroup2D = MTLSize(width: min(n, 256), height: 1, depth: 1)
+        let threadGroups2D = MTLSize(
+            width: (n + threadsPerGroup2D.width - 1) / threadsPerGroup2D.width,
+            height: batchSize,
+            depth: 1
+        )
+        bitReverseEncoder.dispatchThreadgroups(threadGroups2D, threadsPerThreadgroup: threadsPerGroup2D)
+        bitReverseEncoder.endEncoding()
+
+        // Step 2: Butterfly stages (log2n stages)
+        for stage in 0..<log2n {
+            guard let butterflyEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                throw MetalEngineError.encodingFailed
+            }
+
+            var stageVar = UInt32(stage)
+
+            butterflyEncoder.setComputePipelineState(butterflyPipeline)
+            butterflyEncoder.setBuffer(workRealBuffer, offset: 0, index: 0)
+            butterflyEncoder.setBuffer(workImagBuffer, offset: 0, index: 1)
+            butterflyEncoder.setBytes(&nVar, length: MemoryLayout<UInt32>.size, index: 2)
+            butterflyEncoder.setBytes(&stageVar, length: MemoryLayout<UInt32>.size, index: 3)
+            butterflyEncoder.setBytes(&batchSizeVar, length: MemoryLayout<UInt32>.size, index: 4)
+
+            // Each stage processes n/2 butterflies per batch
+            let butterfliesPerBatch = n / 2
+            let butterflyThreadsPerGroup = MTLSize(width: min(butterfliesPerBatch, 256), height: 1, depth: 1)
+            let butterflyThreadGroups = MTLSize(
+                width: (butterfliesPerBatch + butterflyThreadsPerGroup.width - 1) / butterflyThreadsPerGroup.width,
+                height: batchSize,
+                depth: 1
+            )
+
+            butterflyEncoder.dispatchThreadgroups(butterflyThreadGroups, threadsPerThreadgroup: butterflyThreadsPerGroup)
+            butterflyEncoder.endEncoding()
+        }
+
+        // Execute
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        // Read results
+        let realPtr = workRealBuffer.contents().assumingMemoryBound(to: Float.self)
+        let imagPtr = workImagBuffer.contents().assumingMemoryBound(to: Float.self)
+
+        return (
+            Array(UnsafeBufferPointer(start: realPtr, count: totalElements)),
+            Array(UnsafeBufferPointer(start: imagPtr, count: totalElements))
+        )
+    }
+
+    /// Compute STFT magnitude using GPU FFT.
+    ///
+    /// This performs the entire STFT pipeline on GPU:
+    /// 1. Frame extraction and windowing (CPU)
+    /// 2. Batch FFT (GPU)
+    /// 3. Magnitude computation (GPU)
+    ///
+    /// - Parameters:
+    ///   - frames: Windowed frames, flat array [nFrames * nFFT].
+    ///   - nFFT: FFT size (must be power of 2).
+    ///   - nFrames: Number of frames.
+    /// - Returns: Magnitude spectrogram as ContiguousMatrix (nFreqs × nFrames).
+    public func stftMagnitude(
+        frames: [Float],
+        nFFT: Int,
+        nFrames: Int
+    ) async throws -> ContiguousMatrix {
+        guard nFFT > 0 && (nFFT & (nFFT - 1)) == 0 else {
+            throw MetalEngineError.encodingFailed
+        }
+
+        let nFreqs = nFFT / 2 + 1
+
+        // Prepare imaginary part (zeros)
+        let imag = [Float](repeating: 0, count: frames.count)
+
+        // Compute batch FFT
+        let (fftReal, fftImag) = try await batchFFT(
+            real: frames,
+            imag: imag,
+            n: nFFT,
+            batchSize: nFrames
+        )
+
+        // Compute magnitude on GPU
+        let fftBytes = fftReal.count * MemoryLayout<Float>.size
+        let magBytes = nFreqs * nFrames * MemoryLayout<Float>.size
+
+        guard let fftRealBuffer = bufferPool.acquire(minBytes: fftBytes),
+              let fftImagBuffer = bufferPool.acquire(minBytes: fftBytes),
+              let magBuffer = bufferPool.acquire(minBytes: magBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer {
+            bufferPool.release(fftRealBuffer)
+            bufferPool.release(fftImagBuffer)
+            bufferPool.release(magBuffer)
+        }
+
+        memcpy(fftRealBuffer.contents(), fftReal, fftBytes)
+        memcpy(fftImagBuffer.contents(), fftImag, fftBytes)
+
+        let magPipeline = try getPipeline(for: "stftMagnitude")
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalEngineError.commandBufferFailed
+        }
+
+        var nFFTVar = UInt32(nFFT)
+        var nFramesVar = UInt32(nFrames)
+        var nFreqsVar = UInt32(nFreqs)
+
+        encoder.setComputePipelineState(magPipeline)
+        encoder.setBuffer(fftRealBuffer, offset: 0, index: 0)
+        encoder.setBuffer(fftImagBuffer, offset: 0, index: 1)
+        encoder.setBuffer(magBuffer, offset: 0, index: 2)
+        encoder.setBytes(&nFFTVar, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&nFramesVar, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&nFreqsVar, length: MemoryLayout<UInt32>.size, index: 5)
+
+        let threadsPerGroup = MTLSize(width: 16, height: 16, depth: 1)
+        let threadGroups = MTLSize(
+            width: (nFrames + threadsPerGroup.width - 1) / threadsPerGroup.width,
+            height: (nFreqs + threadsPerGroup.height - 1) / threadsPerGroup.height,
+            depth: 1
+        )
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        // Read results
+        let magPtr = magBuffer.contents().assumingMemoryBound(to: Float.self)
+        let magData = Array(UnsafeBufferPointer(start: magPtr, count: nFreqs * nFrames))
+
+        return ContiguousMatrix(data: magData, rows: nFreqs, cols: nFrames)
+    }
 }
 
 // MARK: - GPU Threshold Configuration

@@ -145,7 +145,7 @@ public struct VAD: Sendable {
 
         // Apply threshold to get decisions
         var decisions = [Float](repeating: 0, count: nFrames)
-        var confidences = rawScores
+        let confidences = rawScores
 
         for i in 0..<nFrames {
             decisions[i] = rawScores[i] > 0.5 ? 1.0 : 0.0
@@ -360,28 +360,96 @@ public struct VAD: Sendable {
     }
 
     private func computeMagnitudeSpec(_ signal: [Float]) -> [[Float]] {
-        let stft = STFT(config: STFTConfig(
-            nFFT: config.frameLength * 2,
-            hopLength: config.hopLength,
-            winLength: config.frameLength,
-            windowType: .hann,
-            center: true,
-            padMode: .reflect
-        ))
+        let nFFT = config.frameLength * 2
+        let nFreqs = nFFT / 2 + 1
 
-        // Synchronously compute STFT magnitude
-        // This is a simplification - in production, you'd want async
+        // Pad signal for centered frames
+        let padLength = nFFT / 2
+        let paddedSignal = padSignal(signal, padLength: padLength)
+
+        // Frame the padded signal
+        let nFrames = max(0, 1 + (paddedSignal.count - nFFT) / config.hopLength)
+        guard nFrames > 0 else { return [] }
+
+        // Generate window
+        let window = Windows.generate(.hann, length: config.frameLength, periodic: true)
+
+        // Create FFT setup
+        let log2n = vDSP_Length(log2(Double(nFFT)))
+        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
+            return []
+        }
+        defer { vDSP_destroy_fftsetup(fftSetup) }
+
+        // Allocate workspace buffers
+        var windowedFrame = [Float](repeating: 0, count: nFFT)
+        var realInput = [Float](repeating: 0, count: nFFT / 2)
+        var imagInput = [Float](repeating: 0, count: nFFT / 2)
+
+        // Initialize result: shape (nFreqs, nFrames)
         var result = [[Float]]()
-
-        // Frame the signal and compute FFT manually (simplified)
-        let frames = frameSignal(signal)
-        let nFreqs = config.frameLength + 1
-
+        result.reserveCapacity(nFreqs)
         for _ in 0..<nFreqs {
-            result.append([Float](repeating: 0, count: frames.count))
+            result.append([Float](repeating: 0, count: nFrames))
         }
 
-        // For now, return placeholder - actual implementation would compute FFT
+        // Process each frame
+        for frameIdx in 0..<nFrames {
+            let start = frameIdx * config.hopLength
+            let end = min(start + nFFT, paddedSignal.count)
+
+            // Zero the windowed frame buffer
+            _ = windowedFrame.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
+
+            // Copy and apply window (zero-pad if needed)
+            let frameLength = min(end - start, config.frameLength)
+            for i in 0..<frameLength {
+                windowedFrame[i] = paddedSignal[start + i] * window[i]
+            }
+
+            // Reset FFT buffers
+            _ = realInput.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
+            _ = imagInput.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
+
+            // Pack into split complex and compute FFT
+            realInput.withUnsafeMutableBufferPointer { realPtr in
+                imagInput.withUnsafeMutableBufferPointer { imagPtr in
+                    var split = DSPSplitComplex(realp: realPtr.baseAddress!, imagp: imagPtr.baseAddress!)
+
+                    windowedFrame.withUnsafeBufferPointer { inputPtr in
+                        vDSP_ctoz(
+                            UnsafePointer<DSPComplex>(OpaquePointer(inputPtr.baseAddress!)),
+                            2,
+                            &split,
+                            1,
+                            vDSP_Length(nFFT / 2)
+                        )
+                    }
+
+                    vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
+
+                    // Scale by 1/2 (vDSP FFT convention)
+                    var scale: Float = 0.5
+                    vDSP_vsmul(split.realp, 1, &scale, split.realp, 1, vDSP_Length(nFFT / 2))
+                    vDSP_vsmul(split.imagp, 1, &scale, split.imagp, 1, vDSP_Length(nFFT / 2))
+                }
+            }
+
+            // Compute magnitude for each frequency bin
+            // DC component
+            result[0][frameIdx] = abs(realInput[0])
+
+            // Positive frequencies
+            for freqIdx in 1..<(nFFT / 2) {
+                let real = realInput[freqIdx]
+                let imag = imagInput[freqIdx]
+                result[freqIdx][frameIdx] = sqrt(real * real + imag * imag)
+            }
+
+            // Nyquist
+            result[nFFT / 2][frameIdx] = abs(imagInput[0])
+        }
+
         return result
     }
 

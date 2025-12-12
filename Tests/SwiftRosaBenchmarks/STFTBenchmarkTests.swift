@@ -1,7 +1,7 @@
 import XCTest
 
+@testable import SwiftRosaCore
 @testable import SwiftRosaML
-import SwiftRosaCore
 
 /// Benchmark tests for STFT and related operations.
 ///

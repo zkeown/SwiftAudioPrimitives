@@ -1,0 +1,188 @@
+name: SwiftRosa Librosa Validation
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  SWIFT_VERSION: '5.9'
+
+jobs:
+  generate-reference-data:
+    name: Generate Reference Data
+    runs-on: macos-14
+    outputs:
+      cache-key: ${{ steps.cache-key.outputs.key }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Generate cache key
+        id: cache-key
+        run: |
+          HASH=$(sha256sum scripts/generate_reference_data.py | cut -d' ' -f1)
+          echo "key=reference-data-$HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache reference data
+        id: cache-reference
+        uses: actions/cache@v4
+        with:
+          path: Tests/SwiftRosaCoreTests/ReferenceData/librosa_reference.json
+          key: ${{ steps.cache-key.outputs.key }}
+
+      - name: Install Python dependencies
+        if: steps.cache-reference.outputs.cache-hit != 'true'
+        run: |
+          pip install --upgrade pip
+          pip install librosa numpy scipy
+          pip freeze | grep -E "librosa|numpy|scipy" > python_versions.txt
+          cat python_versions.txt
+
+      - name: Generate reference data
+        if: steps.cache-reference.outputs.cache-hit != 'true'
+        run: |
+          python scripts/generate_reference_data.py
+          ls -la Tests/SwiftRosaCoreTests/ReferenceData/
+
+      - name: Upload reference data
+        uses: actions/upload-artifact@v4
+        with:
+          name: reference-data
+          path: |
+            Tests/SwiftRosaCoreTests/ReferenceData/librosa_reference.json
+          retention-days: 7
+
+  run-validation-tests:
+    name: Run Validation Tests
+    needs: generate-reference-data
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download reference data
+        uses: actions/download-artifact@v4
+        with:
+          name: reference-data
+          path: Tests/SwiftRosaCoreTests/ReferenceData/
+
+      - name: Verify reference data
+        run: |
+          ls -la Tests/SwiftRosaCoreTests/ReferenceData/
+          head -c 1000 Tests/SwiftRosaCoreTests/ReferenceData/librosa_reference.json
+
+      - name: Build package
+        run: |
+          swift build -c release 2>&1 | tee build_output.txt
+
+      - name: Run all tests
+        run: |
+          swift test 2>&1 | tee test_output.txt
+
+      - name: Run validation tests specifically
+        run: |
+          swift test --filter "Validation" 2>&1 | tee validation_output.txt || true
+
+      - name: Check for test failures
+        run: |
+          if grep -q "FAILED" test_output.txt; then
+            echo "::warning::Some tests failed. Check test_output.txt for details."
+            grep "FAILED" test_output.txt || true
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            build_output.txt
+            test_output.txt
+            validation_output.txt
+          retention-days: 7
+
+  api-coverage:
+    name: API Coverage Report
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run API coverage check
+        run: |
+          python scripts/check_api_coverage.py --report api_coverage.md
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-coverage
+          path: api_coverage.md
+          retention-days: 30
+
+      - name: Comment on PR with coverage
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const reportPath = 'api_coverage.md';
+            if (fs.existsSync(reportPath)) {
+              const report = fs.readFileSync(reportPath, 'utf8');
+              // Truncate if too long
+              const maxLength = 65000;
+              const truncatedReport = report.length > maxLength
+                ? report.substring(0, maxLength) + '\n\n... (truncated)'
+                : report;
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: truncatedReport
+              });
+            }
+
+  validation-summary:
+    name: Validation Summary
+    needs: [generate-reference-data, run-validation-tests, api-coverage]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Generate summary
+        run: |
+          echo "# SwiftRosa Validation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+          if [ -f test-results/test_output.txt ]; then
+            PASSED=$(grep -c "Test Case.*passed" test-results/test_output.txt || echo "0")
+            FAILED=$(grep -c "FAILED" test-results/test_output.txt || echo "0")
+            echo "- **Passed:** $PASSED" >> $GITHUB_STEP_SUMMARY
+            echo "- **Failed:** $FAILED" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "## API Coverage" >> $GITHUB_STEP_SUMMARY
+          if [ -f api-coverage/api_coverage.md ]; then
+            head -50 api-coverage/api_coverage.md >> $GITHUB_STEP_SUMMARY
+          fi

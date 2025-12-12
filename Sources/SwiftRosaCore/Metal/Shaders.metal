@@ -558,3 +558,446 @@ kernel void euclideanDistanceMatrix(
 
     distances[i * nY + j] = sqrt(distSq);
 }
+
+// MARK: - NMF (Non-negative Matrix Factorization)
+
+/// NMF matrix multiplication: C = A @ B
+///
+/// Parameters:
+/// - A: Matrix [M * K] (row-major)
+/// - B: Matrix [K * N] (row-major)
+/// - C: Output matrix [M * N] (row-major)
+/// - M, K, N: Matrix dimensions
+kernel void nmfMatrixMultiply(
+    device const float* A [[buffer(0)]],
+    device const float* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
+    constant uint& M [[buffer(3)]],
+    constant uint& K [[buffer(4)]],
+    constant uint& N [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;  // M dimension
+    uint col = gid.x;  // N dimension
+
+    if (row >= M || col >= N) {
+        return;
+    }
+
+    float sum = 0.0f;
+    for (uint k = 0; k < K; k++) {
+        sum += A[row * K + k] * B[k * N + col];
+    }
+
+    C[row * N + col] = sum;
+}
+
+/// NMF multiplicative update for W matrix.
+///
+/// W_new = W * (V @ H^T) / (W @ H @ H^T + eps)
+///
+/// This kernel computes the element-wise update directly.
+/// numerator = sum_j(V[i,j] * H[k,j])
+/// denominator = sum_j((WH)[i,j] * H[k,j]) + eps
+/// W[i,k] *= numerator / denominator
+kernel void nmfUpdateW(
+    device float* W [[buffer(0)]],
+    device const float* V [[buffer(1)]],
+    device const float* H [[buffer(2)]],
+    device const float* WH [[buffer(3)]],
+    constant uint& M [[buffer(4)]],
+    constant uint& N [[buffer(5)]],
+    constant uint& K [[buffer(6)]],
+    constant float& eps [[buffer(7)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint i = gid.y;  // Row in W (frequency bin)
+    uint k = gid.x;  // Column in W (component)
+
+    if (i >= M || k >= K) {
+        return;
+    }
+
+    float numerator = 0.0f;
+    float denominator = 0.0f;
+
+    for (uint j = 0; j < N; j++) {
+        float h_kj = H[k * N + j];
+        numerator += V[i * N + j] * h_kj;
+        denominator += WH[i * N + j] * h_kj;
+    }
+
+    uint idx = i * K + k;
+    W[idx] *= numerator / (denominator + eps);
+}
+
+/// NMF multiplicative update for H matrix.
+///
+/// H_new = H * (W^T @ V) / (W^T @ W @ H + eps)
+///
+/// numerator = sum_i(W[i,k] * V[i,j])
+/// denominator = sum_i(W[i,k] * (WH)[i,j]) + eps
+/// H[k,j] *= numerator / denominator
+kernel void nmfUpdateH(
+    device const float* W [[buffer(0)]],
+    device const float* V [[buffer(1)]],
+    device float* H [[buffer(2)]],
+    device const float* WH [[buffer(3)]],
+    constant uint& M [[buffer(4)]],
+    constant uint& N [[buffer(5)]],
+    constant uint& K [[buffer(6)]],
+    constant float& eps [[buffer(7)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint k = gid.y;  // Row in H (component)
+    uint j = gid.x;  // Column in H (time frame)
+
+    if (k >= K || j >= N) {
+        return;
+    }
+
+    float numerator = 0.0f;
+    float denominator = 0.0f;
+
+    for (uint i = 0; i < M; i++) {
+        float w_ik = W[i * K + k];
+        numerator += w_ik * V[i * N + j];
+        denominator += w_ik * WH[i * N + j];
+    }
+
+    uint idx = k * N + j;
+    H[idx] *= numerator / (denominator + eps);
+}
+
+/// Compute reconstruction error (Frobenius norm of difference).
+///
+/// error = sum((V - WH)^2)
+kernel void nmfReconstructionError(
+    device const float* V [[buffer(0)]],
+    device const float* WH [[buffer(1)]],
+    device atomic_float* error [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= count) {
+        return;
+    }
+
+    float diff = V[gid] - WH[gid];
+    float diffSq = diff * diff;
+    atomic_fetch_add_explicit(error, diffSq, memory_order_relaxed);
+}
+
+/// Element-wise maximum with zero (ReLU / non-negativity constraint).
+kernel void nmfRelu(
+    device float* data [[buffer(0)]],
+    constant uint& count [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= count) {
+        return;
+    }
+    data[gid] = max(0.0f, data[gid]);
+}
+
+// MARK: - Nearest Neighbor Filter
+
+/// Compute k-nearest neighbors for each column in a feature matrix.
+///
+/// For each frame j, finds the k most similar frames based on feature distance.
+/// Output contains indices and distances of nearest neighbors.
+kernel void knnSearch(
+    device const float* features [[buffer(0)]],
+    device uint* indices [[buffer(1)]],
+    device float* distances [[buffer(2)]],
+    constant uint& nFeatures [[buffer(3)]],
+    constant uint& nFrames [[buffer(4)]],
+    constant uint& k [[buffer(5)]],
+    constant uint& width [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= nFrames) {
+        return;
+    }
+
+    // For this frame, find k nearest neighbors within window
+    uint windowStart = (gid > width) ? (gid - width) : 0;
+    uint windowEnd = min(gid + width + 1, nFrames);
+
+    // Simple insertion sort to maintain top-k
+    for (uint i = 0; i < k; i++) {
+        indices[gid * k + i] = gid;
+        distances[gid * k + i] = 1e30f;
+    }
+
+    for (uint j = windowStart; j < windowEnd; j++) {
+        if (j == gid) continue;  // Skip self
+
+        // Compute distance
+        float dist = 0.0f;
+        for (uint f = 0; f < nFeatures; f++) {
+            float diff = features[f * nFrames + gid] - features[f * nFrames + j];
+            dist += diff * diff;
+        }
+        dist = sqrt(dist);
+
+        // Insert if closer than current k-th nearest
+        if (dist < distances[gid * k + k - 1]) {
+            // Find insertion point
+            uint insertPos = k - 1;
+            for (uint i = 0; i < k - 1; i++) {
+                if (dist < distances[gid * k + i]) {
+                    insertPos = i;
+                    break;
+                }
+            }
+
+            // Shift elements
+            for (uint i = k - 1; i > insertPos; i--) {
+                indices[gid * k + i] = indices[gid * k + i - 1];
+                distances[gid * k + i] = distances[gid * k + i - 1];
+            }
+
+            // Insert
+            indices[gid * k + insertPos] = j;
+            distances[gid * k + insertPos] = dist;
+        }
+    }
+}
+
+// MARK: - FFT Primitives
+
+/// Bit-reversal permutation for FFT input.
+///
+/// Reorders input array so that FFT butterfly operations proceed correctly.
+/// index i maps to bit_reverse(i, log2(n))
+kernel void fftBitReverse(
+    device const float* inputReal [[buffer(0)]],
+    device const float* inputImag [[buffer(1)]],
+    device float* outputReal [[buffer(2)]],
+    device float* outputImag [[buffer(3)]],
+    constant uint& n [[buffer(4)]],
+    constant uint& log2n [[buffer(5)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= n) return;
+
+    // Compute bit-reversed index
+    uint rev = 0;
+    uint idx = gid;
+    for (uint i = 0; i < log2n; i++) {
+        rev = (rev << 1) | (idx & 1);
+        idx >>= 1;
+    }
+
+    outputReal[gid] = inputReal[rev];
+    outputImag[gid] = inputImag[rev];
+}
+
+/// Single FFT butterfly stage.
+///
+/// Performs in-place butterfly operation for one stage of the radix-2 DIT FFT.
+/// stage: 0 to log2(n)-1
+/// Each butterfly combines elements separated by 2^stage distance.
+kernel void fftButterflyStage(
+    device float* real [[buffer(0)]],
+    device float* imag [[buffer(1)]],
+    constant uint& n [[buffer(2)]],
+    constant uint& stage [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    uint butterflySize = 1u << (stage + 1);  // Size of butterfly group
+    uint halfSize = 1u << stage;             // Distance between butterfly pairs
+
+    // Each thread handles one butterfly operation
+    uint butterfliesPerGroup = halfSize;
+    uint groupIdx = gid / butterfliesPerGroup;
+    uint withinGroup = gid % butterfliesPerGroup;
+
+    // Skip if out of bounds
+    uint totalButterflies = n / 2;
+    if (gid >= totalButterflies) return;
+
+    // Indices of the two elements in this butterfly
+    uint idx1 = groupIdx * butterflySize + withinGroup;
+    uint idx2 = idx1 + halfSize;
+
+    // Twiddle factor: W_n^k = exp(-2πi * k / butterflySize)
+    // where k = withinGroup
+    float angle = -2.0f * M_PI_F * float(withinGroup) / float(butterflySize);
+    float twiddleReal = cos(angle);
+    float twiddleImag = sin(angle);
+
+    // Load current values
+    float aReal = real[idx1];
+    float aImag = imag[idx1];
+    float bReal = real[idx2];
+    float bImag = imag[idx2];
+
+    // Multiply b by twiddle factor
+    float tReal = bReal * twiddleReal - bImag * twiddleImag;
+    float tImag = bReal * twiddleImag + bImag * twiddleReal;
+
+    // Butterfly: a' = a + t, b' = a - t
+    real[idx1] = aReal + tReal;
+    imag[idx1] = aImag + tImag;
+    real[idx2] = aReal - tReal;
+    imag[idx2] = aImag - tImag;
+}
+
+/// Batch FFT for multiple independent transforms.
+///
+/// Computes FFT for batchSize independent signals of length n.
+/// Data layout: batch-major, i.e., real[batch * n + i] for sample i of batch.
+kernel void fftBatchButterflyStage(
+    device float* real [[buffer(0)]],
+    device float* imag [[buffer(1)]],
+    constant uint& n [[buffer(2)]],
+    constant uint& stage [[buffer(3)]],
+    constant uint& batchSize [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint batchIdx = gid.y;
+    uint butterflyIdx = gid.x;
+
+    if (batchIdx >= batchSize) return;
+
+    uint butterflySize = 1u << (stage + 1);
+    uint halfSize = 1u << stage;
+    uint totalButterflies = n / 2;
+
+    if (butterflyIdx >= totalButterflies) return;
+
+    uint groupIdx = butterflyIdx / halfSize;
+    uint withinGroup = butterflyIdx % halfSize;
+
+    uint baseOffset = batchIdx * n;
+    uint idx1 = baseOffset + groupIdx * butterflySize + withinGroup;
+    uint idx2 = idx1 + halfSize;
+
+    float angle = -2.0f * M_PI_F * float(withinGroup) / float(butterflySize);
+    float twiddleReal = cos(angle);
+    float twiddleImag = sin(angle);
+
+    float aReal = real[idx1];
+    float aImag = imag[idx1];
+    float bReal = real[idx2];
+    float bImag = imag[idx2];
+
+    float tReal = bReal * twiddleReal - bImag * twiddleImag;
+    float tImag = bReal * twiddleImag + bImag * twiddleReal;
+
+    real[idx1] = aReal + tReal;
+    imag[idx1] = aImag + tImag;
+    real[idx2] = aReal - tReal;
+    imag[idx2] = aImag - tImag;
+}
+
+/// Batch bit-reversal for multiple FFTs.
+kernel void fftBatchBitReverse(
+    device const float* inputReal [[buffer(0)]],
+    device const float* inputImag [[buffer(1)]],
+    device float* outputReal [[buffer(2)]],
+    device float* outputImag [[buffer(3)]],
+    constant uint& n [[buffer(4)]],
+    constant uint& log2n [[buffer(5)]],
+    constant uint& batchSize [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint batchIdx = gid.y;
+    uint sampleIdx = gid.x;
+
+    if (batchIdx >= batchSize || sampleIdx >= n) return;
+
+    // Bit-reverse the sample index
+    uint rev = 0;
+    uint idx = sampleIdx;
+    for (uint i = 0; i < log2n; i++) {
+        rev = (rev << 1) | (idx & 1);
+        idx >>= 1;
+    }
+
+    uint srcOffset = batchIdx * n;
+    uint dstOffset = srcOffset;
+
+    outputReal[dstOffset + sampleIdx] = inputReal[srcOffset + rev];
+    outputImag[dstOffset + sampleIdx] = inputImag[srcOffset + rev];
+}
+
+/// STFT magnitude computation kernel.
+///
+/// Computes magnitude from FFT output directly on GPU.
+/// Writes only positive frequencies (n/2 + 1 bins).
+kernel void stftMagnitude(
+    device const float* fftReal [[buffer(0)]],
+    device const float* fftImag [[buffer(1)]],
+    device float* magnitude [[buffer(2)]],
+    constant uint& nFFT [[buffer(3)]],
+    constant uint& nFrames [[buffer(4)]],
+    constant uint& nFreqs [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint frameIdx = gid.x;
+    uint freqIdx = gid.y;
+
+    if (frameIdx >= nFrames || freqIdx >= nFreqs) return;
+
+    // FFT data is stored batch-major: fftReal[frame * nFFT + bin]
+    uint fftIdx = frameIdx * nFFT + freqIdx;
+    float r = fftReal[fftIdx];
+    float i = fftImag[fftIdx];
+
+    // Output in row-major (freq × frames): magnitude[freq * nFrames + frame]
+    uint outIdx = freqIdx * nFrames + frameIdx;
+    magnitude[outIdx] = sqrt(r * r + i * i);
+}
+
+/// Apply median filter to features using pre-computed nearest neighbors.
+///
+/// For each frame, computes the median of its k nearest neighbors.
+kernel void nnMedianFilter(
+    device const float* features [[buffer(0)]],
+    device const uint* neighborIndices [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& nFeatures [[buffer(3)]],
+    constant uint& nFrames [[buffer(4)]],
+    constant uint& k [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint frameIdx = gid.x;
+    uint featureIdx = gid.y;
+
+    if (frameIdx >= nFrames || featureIdx >= nFeatures) {
+        return;
+    }
+
+    // Gather values from neighbors
+    float values[32];  // Max k = 32
+    uint actualK = min(k, 32u);
+
+    for (uint i = 0; i < actualK; i++) {
+        uint neighborIdx = neighborIndices[frameIdx * k + i];
+        values[i] = features[featureIdx * nFrames + neighborIdx];
+    }
+
+    // Sort values (simple insertion sort for small k)
+    for (uint i = 1; i < actualK; i++) {
+        float val = values[i];
+        uint j = i;
+        while (j > 0 && values[j - 1] > val) {
+            values[j] = values[j - 1];
+            j--;
+        }
+        values[j] = val;
+    }
+
+    // Median
+    float median;
+    if (actualK % 2 == 0) {
+        median = (values[actualK / 2 - 1] + values[actualK / 2]) / 2.0f;
+    } else {
+        median = values[actualK / 2];
+    }
+
+    output[featureIdx * nFrames + frameIdx] = median;
+}

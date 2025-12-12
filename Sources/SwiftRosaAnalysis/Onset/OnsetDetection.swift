@@ -52,18 +52,20 @@ public struct OnsetConfig: Sendable {
     public let wait: Int
 
     /// Create onset detection configuration.
+    ///
+    /// Default values match librosa's `onset_detect` function.
     public init(
         sampleRate: Float = 22050,
         hopLength: Int = 512,
         nFFT: Int = 2048,
         method: OnsetMethod = .spectralFlux,
-        peakThreshold: Float = 0.5,
-        preMax: Int = 3,
-        postMax: Int = 3,
-        preAvg: Int = 3,
-        postAvg: Int = 3,
-        delta: Float = 0.07,
-        wait: Int = 30
+        peakThreshold: Float = 0.3,
+        preMax: Int = 1,
+        postMax: Int = 1,
+        preAvg: Int = 1,
+        postAvg: Int = 1,
+        delta: Float = 0.0,
+        wait: Int = 1
     ) {
         self.sampleRate = sampleRate
         self.hopLength = hopLength
@@ -117,7 +119,7 @@ public struct OnsetDetector: Sendable {
             winLength: config.nFFT,
             windowType: .hann,
             center: true,
-            padMode: .reflect
+            padMode: .constant(0)  // Match librosa default
         ))
     }
 
@@ -375,20 +377,20 @@ public struct OnsetDetector: Sendable {
 // MARK: - Presets
 
 extension OnsetDetector {
-    /// Standard configuration for general use.
+    /// Standard configuration for general use (matches librosa defaults).
     public static var standard: OnsetDetector {
         OnsetDetector(config: OnsetConfig(
             sampleRate: 22050,
             hopLength: 512,
             nFFT: 2048,
             method: .spectralFlux,
-            peakThreshold: 0.5,
-            preMax: 3,
-            postMax: 3,
-            preAvg: 3,
-            postAvg: 3,
-            delta: 0.07,
-            wait: 30
+            peakThreshold: 0.3,
+            preMax: 1,
+            postMax: 1,
+            preAvg: 1,
+            postAvg: 1,
+            delta: 0.0,
+            wait: 1
         ))
     }
 
@@ -399,13 +401,13 @@ extension OnsetDetector {
             hopLength: 256,
             nFFT: 1024,
             method: .highFrequencyContent,
-            peakThreshold: 0.3,
-            preMax: 2,
-            postMax: 2,
-            preAvg: 2,
-            postAvg: 2,
-            delta: 0.05,
-            wait: 20
+            peakThreshold: 0.2,
+            preMax: 1,
+            postMax: 1,
+            preAvg: 1,
+            postAvg: 1,
+            delta: 0.0,
+            wait: 1
         ))
     }
 
@@ -416,13 +418,13 @@ extension OnsetDetector {
             hopLength: 512,
             nFFT: 2048,
             method: .complexDomain,
-            peakThreshold: 0.4,
-            preMax: 4,
-            postMax: 4,
-            preAvg: 4,
-            postAvg: 4,
-            delta: 0.1,
-            wait: 40
+            peakThreshold: 0.3,
+            preMax: 3,
+            postMax: 3,
+            preAvg: 3,
+            postAvg: 3,
+            delta: 0.05,
+            wait: 1
         ))
     }
 }

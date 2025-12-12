@@ -53,7 +53,7 @@ public struct MelSpectrogram: Sendable {
         winLength: Int? = nil,
         windowType: WindowType = .hann,
         center: Bool = true,
-        padMode: PadMode = .reflect,
+        padMode: PadMode = .constant(0),
         nMels: Int = 128,
         fMin: Float = 0,
         fMax: Float? = nil,
