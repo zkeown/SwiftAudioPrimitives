@@ -145,17 +145,25 @@ public struct SpectralFeatures: Sendable {
 
         var result = [Float](repeating: 0, count: nFrames)
 
-        for t in 0..<nFrames {
-            var weightedSum: Float = 0
-            var totalWeight: Float = 0
+        // Process each frame using vectorized operations
+        frequencies.withUnsafeBufferPointer { freqPtr in
+            for t in 0..<nFrames {
+                // Extract magnitude column for this frame
+                var magCol = [Float](repeating: 0, count: nFreqs)
+                for f in 0..<nFreqs {
+                    magCol[f] = magnitudeSpec[f][t]
+                }
 
-            for f in 0..<nFreqs {
-                let mag = magnitudeSpec[f][t]
-                weightedSum += frequencies[f] * mag
-                totalWeight += mag
+                // Compute weighted sum: dot product of frequencies and magnitudes
+                var weightedSum: Float = 0
+                vDSP_dotpr(freqPtr.baseAddress!, 1, magCol, 1, &weightedSum, vDSP_Length(nFreqs))
+
+                // Compute total weight: sum of magnitudes
+                var totalWeight: Float = 0
+                vDSP_sve(magCol, 1, &totalWeight, vDSP_Length(nFreqs))
+
+                result[t] = totalWeight > 0 ? weightedSum / totalWeight : 0
             }
-
-            result[t] = totalWeight > 0 ? weightedSum / totalWeight : 0
         }
 
         return result
@@ -184,21 +192,46 @@ public struct SpectralFeatures: Sendable {
         let nFrames = magnitudeSpec[0].count
 
         var result = [Float](repeating: 0, count: nFrames)
+        let invP = 1.0 / p
 
-        for t in 0..<nFrames {
-            var weightedSum: Float = 0
-            var totalWeight: Float = 0
-            let cent = centroids[t]
+        frequencies.withUnsafeBufferPointer { freqPtr in
+            for t in 0..<nFrames {
+                let cent = centroids[t]
 
-            for f in 0..<nFreqs {
-                let mag = magnitudeSpec[f][t]
-                let deviation = abs(frequencies[f] - cent)
-                weightedSum += pow(deviation, p) * mag
-                totalWeight += mag
-            }
+                // Extract magnitude column for this frame
+                var magCol = [Float](repeating: 0, count: nFreqs)
+                for f in 0..<nFreqs {
+                    magCol[f] = magnitudeSpec[f][t]
+                }
 
-            if totalWeight > 0 {
-                result[t] = pow(weightedSum / totalWeight, 1.0 / p)
+                // Compute deviations: |freq - centroid|
+                var deviations = [Float](repeating: 0, count: nFreqs)
+                var negCent = -cent
+                vDSP_vsadd(freqPtr.baseAddress!, 1, &negCent, &deviations, 1, vDSP_Length(nFreqs))
+                vDSP_vabs(deviations, 1, &deviations, 1, vDSP_Length(nFreqs))
+
+                // Compute deviation^p
+                if p == 2.0 {
+                    // Special case: use squared (faster)
+                    vDSP_vsq(deviations, 1, &deviations, 1, vDSP_Length(nFreqs))
+                } else {
+                    // General case: element-wise power
+                    var pVar = p
+                    var n = Int32(nFreqs)
+                    vvpowsf(&deviations, &pVar, deviations, &n)
+                }
+
+                // Compute weighted sum: dot product of deviation^p and magnitudes
+                var weightedSum: Float = 0
+                vDSP_dotpr(deviations, 1, magCol, 1, &weightedSum, vDSP_Length(nFreqs))
+
+                // Compute total weight: sum of magnitudes
+                var totalWeight: Float = 0
+                vDSP_sve(magCol, 1, &totalWeight, vDSP_Length(nFreqs))
+
+                if totalWeight > 0 {
+                    result[t] = pow(weightedSum / totalWeight, invP)
+                }
             }
         }
 
@@ -229,19 +262,27 @@ public struct SpectralFeatures: Sendable {
         var result = [Float](repeating: 0, count: nFrames)
 
         for t in 0..<nFrames {
-            // Compute total energy
-            var totalEnergy: Float = 0
+            // Extract magnitude column for this frame
+            var magCol = [Float](repeating: 0, count: nFreqs)
             for f in 0..<nFreqs {
-                totalEnergy += magnitudeSpec[f][t]
+                magCol[f] = magnitudeSpec[f][t]
             }
+
+            // Compute total energy using vDSP_sve
+            var totalEnergy: Float = 0
+            vDSP_sve(magCol, 1, &totalEnergy, vDSP_Length(nFreqs))
 
             let threshold = totalEnergy * rollPercent
 
-            // Find rolloff frequency
-            var cumulativeEnergy: Float = 0
+            // Compute cumulative sum
+            var cumSum = [Float](repeating: 0, count: nFreqs)
+            // vDSP doesn't have prefix sum, but we can use a running sum
+            // For small nFreqs this is fine; for large arrays we could parallelize
+            var runningSum: Float = 0
             for f in 0..<nFreqs {
-                cumulativeEnergy += magnitudeSpec[f][t]
-                if cumulativeEnergy >= threshold {
+                runningSum += magCol[f]
+                cumSum[f] = runningSum
+                if runningSum >= threshold {
                     result[t] = frequencies[f]
                     break
                 }
@@ -272,20 +313,31 @@ public struct SpectralFeatures: Sendable {
         let amin: Float = 1e-10
 
         var result = [Float](repeating: 0, count: nFrames)
+        let invNFreqs = 1.0 / Float(nFreqs)
 
         for t in 0..<nFrames {
-            // Geometric mean = exp(mean(log(x)))
-            var logSum: Float = 0
-            var arithmeticSum: Float = 0
-
+            // Extract magnitude column for this frame
+            var magCol = [Float](repeating: 0, count: nFreqs)
             for f in 0..<nFreqs {
-                let val = max(magnitudeSpec[f][t], amin)
-                logSum += log(val)
-                arithmeticSum += val
+                magCol[f] = max(magnitudeSpec[f][t], amin)
             }
 
-            let geometricMean = exp(logSum / Float(nFreqs))
-            let arithmeticMean = arithmeticSum / Float(nFreqs)
+            // Compute log of magnitudes using vForce
+            var logMag = [Float](repeating: 0, count: nFreqs)
+            var n = Int32(nFreqs)
+            vvlogf(&logMag, magCol, &n)
+
+            // Compute sum of logs (for geometric mean)
+            var logSum: Float = 0
+            vDSP_sve(logMag, 1, &logSum, vDSP_Length(nFreqs))
+
+            // Compute arithmetic sum
+            var arithmeticSum: Float = 0
+            vDSP_sve(magCol, 1, &arithmeticSum, vDSP_Length(nFreqs))
+
+            // Geometric mean = exp(mean(log(x)))
+            let geometricMean = exp(logSum * invNFreqs)
+            let arithmeticMean = arithmeticSum * invNFreqs
 
             result[t] = arithmeticMean > amin ? geometricMean / arithmeticMean : 0
         }
@@ -314,16 +366,37 @@ public struct SpectralFeatures: Sendable {
 
         var result = [Float](repeating: 0, count: nFrames)
 
-        for t in 1..<nFrames {
-            var fluxSum: Float = 0
+        // Pre-allocate buffers for vectorized operations
+        var currMag = [Float](repeating: 0, count: nFreqs)
+        var prevMag = [Float](repeating: 0, count: nFreqs)
+        var diff = [Float](repeating: 0, count: nFreqs)
 
+        // Extract first frame as previous
+        for f in 0..<nFreqs {
+            prevMag[f] = magnitudeSpec[f][0]
+        }
+
+        for t in 1..<nFrames {
+            // Extract current magnitude column
             for f in 0..<nFreqs {
-                // Half-wave rectified difference (only positive changes)
-                let diff = magnitudeSpec[f][t] - magnitudeSpec[f][t - 1]
-                fluxSum += max(0, diff)
+                currMag[f] = magnitudeSpec[f][t]
             }
 
+            // Compute difference: curr - prev
+            vDSP_vsub(prevMag, 1, currMag, 1, &diff, 1, vDSP_Length(nFreqs))
+
+            // Half-wave rectification: max(0, diff) using vDSP_vthres (threshold at 0)
+            var zero: Float = 0
+            vDSP_vthres(diff, 1, &zero, &diff, 1, vDSP_Length(nFreqs))
+
+            // Sum the positive differences
+            var fluxSum: Float = 0
+            vDSP_sve(diff, 1, &fluxSum, vDSP_Length(nFreqs))
+
             result[t] = fluxSum
+
+            // Swap buffers
+            swap(&currMag, &prevMag)
         }
 
         return result

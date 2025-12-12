@@ -176,7 +176,11 @@ public struct OnsetDetector: Sendable {
         // Normalize envelope
         var maxVal: Float = 0
         vDSP_maxv(onsetEnvelope, 1, &maxVal, vDSP_Length(n))
-        guard maxVal > 0 else { return [] }
+
+        // If the envelope maximum is below a meaningful threshold,
+        // there's no significant onset activity (just numerical noise)
+        let minMeaningfulOnset: Float = 1e-6
+        guard maxVal > minMeaningfulOnset else { return [] }
 
         var normalizedEnvelope = [Float](repeating: 0, count: n)
         var scale = 1.0 / maxVal

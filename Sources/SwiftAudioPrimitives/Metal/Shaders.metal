@@ -342,3 +342,219 @@ kernel void powerToDb(
     float ref = max(refPower, amin);
     db[gid] = 10.0f * log10(p / ref);
 }
+
+// MARK: - Vector Operations
+
+/// Element-wise vector squaring (power of 2).
+///
+/// Computes: output[i] = input[i]^2
+kernel void vectorSquare(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= count) {
+        return;
+    }
+    float val = input[gid];
+    output[gid] = val * val;
+}
+
+/// Element-wise natural logarithm with floor.
+///
+/// Computes: output[i] = log(max(input[i], amin))
+kernel void vectorLog(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant float& amin [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= count) {
+        return;
+    }
+    output[gid] = log(max(input[gid], amin));
+}
+
+/// Element-wise exponential.
+///
+/// Computes: output[i] = exp(input[i])
+kernel void vectorExp(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= count) {
+        return;
+    }
+    output[gid] = exp(input[gid]);
+}
+
+/// Element-wise clamp.
+///
+/// Computes: output[i] = clamp(input[i], minVal, maxVal)
+kernel void vectorClamp(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant float& minVal [[buffer(3)]],
+    constant float& maxVal [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= count) {
+        return;
+    }
+    output[gid] = clamp(input[gid], minVal, maxVal);
+}
+
+// MARK: - Spectral Operations
+
+/// Compute spectral centroid for each frame.
+///
+/// centroid[t] = sum(freq[f] * mag[f,t]) / sum(mag[f,t])
+kernel void spectralCentroid(
+    device const float* magnitudes [[buffer(0)]],
+    device const float* frequencies [[buffer(1)]],
+    device float* centroids [[buffer(2)]],
+    constant uint& nFreqs [[buffer(3)]],
+    constant uint& nFrames [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= nFrames) {
+        return;
+    }
+
+    float weightedSum = 0.0f;
+    float totalWeight = 0.0f;
+
+    for (uint f = 0; f < nFreqs; f++) {
+        float mag = magnitudes[f * nFrames + gid];
+        weightedSum += frequencies[f] * mag;
+        totalWeight += mag;
+    }
+
+    centroids[gid] = (totalWeight > 0.0f) ? (weightedSum / totalWeight) : 0.0f;
+}
+
+/// Compute spectral flux (half-wave rectified difference between frames).
+///
+/// flux[t] = sum(max(0, mag[f,t] - mag[f,t-1]))
+kernel void spectralFlux(
+    device const float* magnitudes [[buffer(0)]],
+    device float* flux [[buffer(1)]],
+    constant uint& nFreqs [[buffer(2)]],
+    constant uint& nFrames [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    // Frame 0 has no previous frame, flux = 0
+    if (gid == 0 || gid >= nFrames) {
+        if (gid == 0 && gid < nFrames) {
+            flux[gid] = 0.0f;
+        }
+        return;
+    }
+
+    float fluxSum = 0.0f;
+
+    for (uint f = 0; f < nFreqs; f++) {
+        float curr = magnitudes[f * nFrames + gid];
+        float prev = magnitudes[f * nFrames + (gid - 1)];
+        float diff = curr - prev;
+        fluxSum += max(0.0f, diff);  // Half-wave rectification
+    }
+
+    flux[gid] = fluxSum;
+}
+
+// MARK: - Resampling
+
+/// Polyphase resampling kernel.
+///
+/// Performs upsampling by inserting zeros and filtering through polyphase branches.
+/// Each output sample computes: sum(input[k] * filter[phase + k * nPhases])
+///
+/// Parameters:
+/// - input: Input signal
+/// - output: Output signal (pre-allocated to outputLength)
+/// - filters: Polyphase filter coefficients (nPhases * filterLen)
+/// - inputLength: Length of input signal
+/// - outputLength: Length of output signal
+/// - upFactor: Upsampling factor (number of phases)
+/// - downFactor: Downsampling factor
+/// - filterLen: Length of each polyphase filter branch
+kernel void polyphaseResample(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    device const float* filters [[buffer(2)]],
+    constant uint& inputLength [[buffer(3)]],
+    constant uint& outputLength [[buffer(4)]],
+    constant uint& upFactor [[buffer(5)]],
+    constant uint& downFactor [[buffer(6)]],
+    constant uint& filterLen [[buffer(7)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= outputLength) {
+        return;
+    }
+
+    // Which phase and input index for this output sample
+    uint n = gid * downFactor;
+    uint phase = n % upFactor;
+    uint inputIdx = n / upFactor;
+
+    float sum = 0.0f;
+
+    // Convolution with polyphase filter
+    for (uint k = 0; k < filterLen; k++) {
+        int idx = int(inputIdx) - int(k);
+        if (idx >= 0 && idx < int(inputLength)) {
+            float filterVal = filters[phase * filterLen + k];
+            sum += input[idx] * filterVal;
+        }
+    }
+
+    output[gid] = sum * float(upFactor);  // Scale by upsampling factor
+}
+
+// MARK: - Distance Computations
+
+/// Compute squared Euclidean distance matrix between two feature sets.
+///
+/// dist[i,j] = sum_f((x[f,i] - y[f,j])^2)
+///
+/// Parameters:
+/// - xFeatures: First feature matrix [nFeatures * nX] (feature-major)
+/// - yFeatures: Second feature matrix [nFeatures * nY] (feature-major)
+/// - distances: Output distance matrix [nX * nY] (row-major)
+/// - nFeatures: Number of features
+/// - nX: Number of samples in X
+/// - nY: Number of samples in Y
+kernel void euclideanDistanceMatrix(
+    device const float* xFeatures [[buffer(0)]],
+    device const float* yFeatures [[buffer(1)]],
+    device float* distances [[buffer(2)]],
+    constant uint& nFeatures [[buffer(3)]],
+    constant uint& nX [[buffer(4)]],
+    constant uint& nY [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint i = gid.x;  // X index
+    uint j = gid.y;  // Y index
+
+    if (i >= nX || j >= nY) {
+        return;
+    }
+
+    float distSq = 0.0f;
+
+    for (uint f = 0; f < nFeatures; f++) {
+        float xi = xFeatures[f * nX + i];
+        float yj = yFeatures[f * nY + j];
+        float diff = xi - yj;
+        distSq += diff * diff;
+    }
+
+    distances[i * nY + j] = sqrt(distSq);
+}

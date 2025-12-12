@@ -308,56 +308,136 @@ public struct DTW: Sendable {
 
     // MARK: - Private Implementation
 
+    /// Transpose feature matrix from (nFeatures, nFrames) to (nFrames, nFeatures) for efficient row access.
+    private func transposeFeatures(_ matrix: [[Float]]) -> [[Float]] {
+        guard !matrix.isEmpty && !matrix[0].isEmpty else { return [] }
+        let nFeatures = matrix.count
+        let nFrames = matrix[0].count
+
+        var result = [[Float]](repeating: [Float](repeating: 0, count: nFeatures), count: nFrames)
+        for f in 0..<nFeatures {
+            for t in 0..<nFrames {
+                result[t][f] = matrix[f][t]
+            }
+        }
+        return result
+    }
+
     private func computeDistanceMatrix(_ x: [[Float]], _ y: [[Float]]) -> [[Float]] {
         let nX = x[0].count
         let nY = y[0].count
+        let nFeatures = x.count
+
+        // Transpose for efficient row access
+        let xT = transposeFeatures(x)
+        let yT = transposeFeatures(y)
 
         var dist = [[Float]](repeating: [Float](repeating: 0, count: nY), count: nX)
 
-        for i in 0..<nX {
+        // Pre-compute norms for cosine distance
+        var xNormsSq: [Float]?
+        var yNormsSq: [Float]?
+
+        if config.metric == .cosine {
+            xNormsSq = [Float](repeating: 0, count: nX)
+            yNormsSq = [Float](repeating: 0, count: nY)
+            for i in 0..<nX {
+                var norm: Float = 0
+                vDSP_dotpr(xT[i], 1, xT[i], 1, &norm, vDSP_Length(nFeatures))
+                xNormsSq![i] = norm
+            }
             for j in 0..<nY {
-                dist[i][j] = pointDistance(x, y, i, j)
+                var norm: Float = 0
+                vDSP_dotpr(yT[j], 1, yT[j], 1, &norm, vDSP_Length(nFeatures))
+                yNormsSq![j] = norm
+            }
+        }
+
+        for i in 0..<nX {
+            xT[i].withUnsafeBufferPointer { xPtr in
+                for j in 0..<nY {
+                    yT[j].withUnsafeBufferPointer { yPtr in
+                        dist[i][j] = computePointDistance(
+                            xPtr: xPtr.baseAddress!,
+                            yPtr: yPtr.baseAddress!,
+                            nFeatures: nFeatures,
+                            xNormSq: xNormsSq?[i],
+                            yNormSq: yNormsSq?[j]
+                        )
+                    }
+                }
             }
         }
 
         return dist
     }
 
-    private func pointDistance(_ x: [[Float]], _ y: [[Float]], _ i: Int, _ j: Int) -> Float {
-        let nFeatures = x.count
-
+    /// Compute distance between two feature vectors with pre-extracted pointers.
+    private func computePointDistance(
+        xPtr: UnsafePointer<Float>,
+        yPtr: UnsafePointer<Float>,
+        nFeatures: Int,
+        xNormSq: Float?,
+        yNormSq: Float?
+    ) -> Float {
         switch config.metric {
         case .euclidean:
-            var sum: Float = 0
-            for f in 0..<nFeatures {
-                let diff = x[f][i] - y[f][j]
-                sum += diff * diff
-            }
-            return sqrt(sum)
+            var distSq: Float = 0
+            vDSP_distancesq(xPtr, 1, yPtr, 1, &distSq, vDSP_Length(nFeatures))
+            return sqrt(distSq)
 
         case .manhattan:
+            var diff = [Float](repeating: 0, count: nFeatures)
+            vDSP_vsub(yPtr, 1, xPtr, 1, &diff, 1, vDSP_Length(nFeatures))
             var sum: Float = 0
-            for f in 0..<nFeatures {
-                sum += abs(x[f][i] - y[f][j])
-            }
+            vDSP_svemg(diff, 1, &sum, vDSP_Length(nFeatures))
             return sum
 
         case .cosine:
             var dotProduct: Float = 0
-            var normX: Float = 0
-            var normY: Float = 0
-
-            for f in 0..<nFeatures {
-                dotProduct += x[f][i] * y[f][j]
-                normX += x[f][i] * x[f][i]
-                normY += y[f][j] * y[f][j]
-            }
-
-            let denom = sqrt(normX) * sqrt(normY)
+            vDSP_dotpr(xPtr, 1, yPtr, 1, &dotProduct, vDSP_Length(nFeatures))
+            let denom = sqrt(xNormSq ?? 0) * sqrt(yNormSq ?? 0)
             if denom > 0 {
                 return 1.0 - dotProduct / denom
             }
             return 1.0
+        }
+    }
+
+    private func pointDistance(_ x: [[Float]], _ y: [[Float]], _ i: Int, _ j: Int) -> Float {
+        let nFeatures = x.count
+
+        // Extract feature vectors for this point pair
+        var xVec = [Float](repeating: 0, count: nFeatures)
+        var yVec = [Float](repeating: 0, count: nFeatures)
+
+        for f in 0..<nFeatures {
+            xVec[f] = x[f][i]
+            yVec[f] = y[f][j]
+        }
+
+        return xVec.withUnsafeBufferPointer { xPtr in
+            yVec.withUnsafeBufferPointer { yPtr in
+                var xNormSq: Float?
+                var yNormSq: Float?
+
+                if config.metric == .cosine {
+                    var xNorm: Float = 0
+                    var yNorm: Float = 0
+                    vDSP_dotpr(xPtr.baseAddress!, 1, xPtr.baseAddress!, 1, &xNorm, vDSP_Length(nFeatures))
+                    vDSP_dotpr(yPtr.baseAddress!, 1, yPtr.baseAddress!, 1, &yNorm, vDSP_Length(nFeatures))
+                    xNormSq = xNorm
+                    yNormSq = yNorm
+                }
+
+                return computePointDistance(
+                    xPtr: xPtr.baseAddress!,
+                    yPtr: yPtr.baseAddress!,
+                    nFeatures: nFeatures,
+                    xNormSq: xNormSq,
+                    yNormSq: yNormSq
+                )
+            }
         }
     }
 
@@ -368,18 +448,56 @@ public struct DTW: Sendable {
 
         case .sakoeChiba:
             let windowSize = config.windowParam ?? max(nX, nY)
-            let expectedJ = Int(Float(j) * Float(nX) / Float(nY))
-            return abs(i - expectedJ) <= windowSize
+            // Map i to expected j along the diagonal, then check if actual j is within window
+            let expectedJ = Int(Float(i) * Float(nY) / Float(nX))
+            return abs(j - expectedJ) <= windowSize
 
         case .itakura:
             let slope = Float(config.windowParam ?? 2)
-            let ratio = Float(nY) / Float(nX)
 
-            // Itakura parallelogram constraints
-            let minJ = Float(i) * ratio / slope
-            let maxJ = Float(i) * ratio * slope
+            // Itakura parallelogram: constrains the warping path to lie within a parallelogram
+            // The path must satisfy both slope constraints:
+            // 1. The slope from (0,0) to (i,j) must be between 1/slope and slope
+            // 2. The slope from (i,j) to (nX-1,nY-1) must also be between 1/slope and slope
 
-            return Float(j) >= minJ && Float(j) <= maxJ
+            // Constraint from start: j/i must be in [1/slope, slope] (adjusted for different lengths)
+            // Constraint from end: (nY-1-j)/(nX-1-i) must be in [1/slope, slope]
+
+            let fi = Float(i)
+            let fj = Float(j)
+            let fnX = Float(nX)
+            let fnY = Float(nY)
+
+            // Handle edge cases
+            if i == 0 && j == 0 { return true }
+            if i == nX - 1 && j == nY - 1 { return true }
+
+            // Slope from origin to current point
+            if i > 0 {
+                let slopeFromStart = fj / fi
+                let expectedSlope = fnY / fnX
+                // Normalized slope should be within [1/slope, slope] of diagonal
+                let normalizedSlope = slopeFromStart / expectedSlope
+                if normalizedSlope < 1.0 / slope || normalizedSlope > slope {
+                    return false
+                }
+            }
+
+            // Slope from current point to end
+            if i < nX - 1 {
+                let remainingI = fnX - 1 - fi
+                let remainingJ = fnY - 1 - fj
+                if remainingI > 0 {
+                    let slopeToEnd = remainingJ / remainingI
+                    let expectedSlope = fnY / fnX
+                    let normalizedSlope = slopeToEnd / expectedSlope
+                    if normalizedSlope < 1.0 / slope || normalizedSlope > slope {
+                        return false
+                    }
+                }
+            }
+
+            return true
         }
     }
 

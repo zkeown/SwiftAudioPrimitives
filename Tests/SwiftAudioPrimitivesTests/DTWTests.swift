@@ -143,6 +143,157 @@ final class DTWTests: XCTestCase {
         XCTAssertEqual(resultConstrained.distance, resultFull.distance, accuracy: 0.1)
     }
 
+    func testSakoeChibaPathConstraint() {
+        // Test that Sakoe-Chiba actually constrains the path
+        let windowSize = 2
+        let dtw = DTW.withSakoeChibaBand(windowSize: windowSize)
+
+        let seq1: [[Float]] = [[1, 2, 3, 4, 5, 6, 7, 8]]
+        let seq2: [[Float]] = [[1, 2, 3, 4, 5, 6, 7, 8]]
+
+        let result = dtw.align(seq1, seq2, includeCostMatrix: true)
+
+        // Verify path stays within window constraint
+        let nX = seq1[0].count
+        let nY = seq2[0].count
+        for (i, j) in result.path {
+            let expectedJ = Int(Float(i) * Float(nY) / Float(nX))
+            let deviation = abs(j - expectedJ)
+            XCTAssertLessThanOrEqual(deviation, windowSize,
+                "Path point (\(i), \(j)) deviates \(deviation) from diagonal, expected <= \(windowSize)")
+        }
+    }
+
+    func testSakoeChibaWithDifferentLengths() {
+        // Test Sakoe-Chiba with sequences of different lengths
+        let windowSize = 3
+        let dtw = DTW.withSakoeChibaBand(windowSize: windowSize)
+
+        let seq1: [[Float]] = [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]]  // 10 elements
+        let seq2: [[Float]] = [[1, 2, 3, 4, 5]]  // 5 elements
+
+        let result = dtw.align(seq1, seq2)
+
+        // Should still find valid alignment
+        XCTAssertGreaterThan(result.path.count, 0)
+        XCTAssertFalse(result.distance.isInfinite, "Should find valid path with window constraint")
+
+        // Path endpoints
+        XCTAssertEqual(result.path.first?.0, 0)
+        XCTAssertEqual(result.path.first?.1, 0)
+        XCTAssertEqual(result.path.last?.0, 9)
+        XCTAssertEqual(result.path.last?.1, 4)
+    }
+
+    func testItakuraParallelogram() {
+        let dtw = DTW(config: DTWConfig(
+            metric: .euclidean,
+            windowType: .itakura,
+            windowParam: 2  // slope constraint
+        ))
+
+        let seq1: [[Float]] = [[1, 2, 3, 4, 5, 6, 7, 8]]
+        let seq2: [[Float]] = [[1, 2, 3, 4, 5, 6, 7, 8]]
+
+        let result = dtw.align(seq1, seq2, includeCostMatrix: true)
+
+        // For identical equal-length sequences, path should be diagonal
+        XCTAssertGreaterThan(result.path.count, 0)
+        XCTAssertEqual(result.distance, 0, accuracy: 1e-6)
+
+        // Verify path is diagonal
+        for (i, j) in result.path {
+            XCTAssertEqual(i, j, "Diagonal path expected for identical sequences")
+        }
+    }
+
+    func testItakuraSlopeConstraint() {
+        // Test that Itakura constraint limits slope deviation
+        let slope = 2
+        let dtw = DTW(config: DTWConfig(
+            metric: .euclidean,
+            windowType: .itakura,
+            windowParam: slope
+        ))
+
+        let seq1: [[Float]] = [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]]
+        let seq2: [[Float]] = [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]]
+
+        let result = dtw.align(seq1, seq2, includeCostMatrix: true)
+
+        // Verify path satisfies slope constraints
+        let nX = seq1[0].count
+        let nY = seq2[0].count
+        let expectedSlope = Float(nY) / Float(nX)
+
+        for (i, j) in result.path {
+            // Check slope from origin (skip origin itself)
+            if i > 0 {
+                let slopeFromStart = Float(j) / Float(i)
+                let normalizedSlope = slopeFromStart / expectedSlope
+
+                XCTAssertGreaterThanOrEqual(normalizedSlope, 1.0 / Float(slope) - 0.01,
+                    "Slope from origin at (\(i), \(j)) = \(normalizedSlope) should be >= \(1.0 / Float(slope))")
+                XCTAssertLessThanOrEqual(normalizedSlope, Float(slope) + 0.01,
+                    "Slope from origin at (\(i), \(j)) = \(normalizedSlope) should be <= \(slope)")
+            }
+        }
+    }
+
+    func testItakuraWithDifferentLengths() {
+        // Test Itakura with sequences of different lengths
+        let dtw = DTW(config: DTWConfig(
+            metric: .euclidean,
+            windowType: .itakura,
+            windowParam: 2
+        ))
+
+        let seq1: [[Float]] = [[1, 2, 3, 4, 5, 6, 7, 8]]  // 8 elements
+        let seq2: [[Float]] = [[1, 2, 3, 4, 5, 6]]  // 6 elements
+
+        let result = dtw.align(seq1, seq2)
+
+        // Should find valid alignment
+        XCTAssertGreaterThan(result.path.count, 0)
+        XCTAssertFalse(result.distance.isInfinite, "Should find valid path with Itakura constraint")
+
+        // Verify endpoints
+        XCTAssertEqual(result.path.first?.0, 0)
+        XCTAssertEqual(result.path.first?.1, 0)
+        XCTAssertEqual(result.path.last?.0, 7)
+        XCTAssertEqual(result.path.last?.1, 5)
+    }
+
+    func testWindowConstraintReducesComputation() {
+        // Verify that window constraints produce valid but potentially different results
+        let dtwFull = DTW.standard
+        let dtwSakoe = DTW.withSakoeChibaBand(windowSize: 2)
+        let dtwItakura = DTW(config: DTWConfig(
+            metric: .euclidean,
+            windowType: .itakura,
+            windowParam: 2
+        ))
+
+        // Sequences that require warping
+        let seq1: [[Float]] = [[1, 2, 2, 3, 3, 3, 4, 5]]
+        let seq2: [[Float]] = [[1, 2, 3, 4, 4, 4, 4, 5]]
+
+        let resultFull = dtwFull.align(seq1, seq2)
+        let resultSakoe = dtwSakoe.align(seq1, seq2)
+        let resultItakura = dtwItakura.align(seq1, seq2)
+
+        // All should produce valid results
+        XCTAssertFalse(resultFull.distance.isInfinite)
+        XCTAssertFalse(resultSakoe.distance.isInfinite)
+        XCTAssertFalse(resultItakura.distance.isInfinite)
+
+        // Constrained results should be >= unconstrained (can't do better with constraints)
+        XCTAssertGreaterThanOrEqual(resultSakoe.distance, resultFull.distance - 0.01,
+            "Sakoe-Chiba distance should be >= unconstrained")
+        XCTAssertGreaterThanOrEqual(resultItakura.distance, resultFull.distance - 0.01,
+            "Itakura distance should be >= unconstrained")
+    }
+
     // MARK: - Subsequence DTW
 
     func testSubsequenceAlignment() {

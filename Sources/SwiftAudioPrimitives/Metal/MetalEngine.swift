@@ -508,16 +508,134 @@ public actor MetalEngine {
     }
 }
 
+// MARK: - GPU Threshold Configuration
+
+/// Configuration for automatic GPU/CPU dispatch decisions.
+///
+/// Tune these thresholds based on your specific hardware and use case.
+/// Lower thresholds favor GPU more aggressively, higher thresholds prefer CPU.
+public struct GPUThresholdConfig: Sendable {
+    /// Minimum elements for general GPU operations (default: 100,000).
+    public var generalThreshold: Int
+
+    /// Minimum elements for matrix multiply operations (default: 50,000).
+    /// Matrix operations have higher arithmetic intensity, so GPU wins earlier.
+    public var matrixMultiplyThreshold: Int
+
+    /// Minimum elements for FFT-related operations (default: 32,768).
+    /// FFT benefits significantly from GPU parallelism.
+    public var fftThreshold: Int
+
+    /// Minimum elements for simple element-wise operations (default: 200,000).
+    /// Simple ops have low arithmetic intensity, need more data to offset overhead.
+    public var elementWiseThreshold: Int
+
+    /// Whether to disable GPU entirely and force CPU fallback.
+    public var forceDisableGPU: Bool
+
+    /// Whether to force GPU usage regardless of data size (for testing).
+    public var forceEnableGPU: Bool
+
+    /// Default configuration with balanced thresholds.
+    public static let `default` = GPUThresholdConfig(
+        generalThreshold: 100_000,
+        matrixMultiplyThreshold: 50_000,
+        fftThreshold: 32_768,
+        elementWiseThreshold: 200_000,
+        forceDisableGPU: false,
+        forceEnableGPU: false
+    )
+
+    /// Aggressive GPU configuration - use GPU for smaller workloads.
+    public static let aggressiveGPU = GPUThresholdConfig(
+        generalThreshold: 10_000,
+        matrixMultiplyThreshold: 5_000,
+        fftThreshold: 4_096,
+        elementWiseThreshold: 20_000,
+        forceDisableGPU: false,
+        forceEnableGPU: false
+    )
+
+    /// Conservative configuration - prefer CPU except for very large workloads.
+    public static let preferCPU = GPUThresholdConfig(
+        generalThreshold: 500_000,
+        matrixMultiplyThreshold: 250_000,
+        fftThreshold: 131_072,
+        elementWiseThreshold: 1_000_000,
+        forceDisableGPU: false,
+        forceEnableGPU: false
+    )
+
+    /// Create custom threshold configuration.
+    public init(
+        generalThreshold: Int = 100_000,
+        matrixMultiplyThreshold: Int = 50_000,
+        fftThreshold: Int = 32_768,
+        elementWiseThreshold: Int = 200_000,
+        forceDisableGPU: Bool = false,
+        forceEnableGPU: Bool = false
+    ) {
+        self.generalThreshold = generalThreshold
+        self.matrixMultiplyThreshold = matrixMultiplyThreshold
+        self.fftThreshold = fftThreshold
+        self.elementWiseThreshold = elementWiseThreshold
+        self.forceDisableGPU = forceDisableGPU
+        self.forceEnableGPU = forceEnableGPU
+    }
+}
+
+/// Type of operation for GPU threshold selection.
+public enum GPUOperationType: Sendable {
+    case general
+    case matrixMultiply
+    case fft
+    case elementWise
+}
+
 // MARK: - CPU Fallback
 
 extension MetalEngine {
+    /// Global GPU threshold configuration.
+    /// Modify this to tune GPU/CPU dispatch behavior across the library.
+    public static var thresholdConfig: GPUThresholdConfig = .default
+
     /// Check if Metal acceleration would be beneficial for given data size.
     ///
     /// - Parameter elementCount: Number of elements to process.
     /// - Returns: True if Metal is likely to be faster than CPU.
     public static func shouldUseGPU(elementCount: Int) -> Bool {
-        // Rough heuristic: GPU overhead is ~100μs, so need enough work to amortize
-        // At ~10 GFLOPS throughput, need at least 1M elements for 100μs of compute
-        return elementCount > 100_000
+        return shouldUseGPU(elementCount: elementCount, operationType: .general)
+    }
+
+    /// Check if Metal acceleration would be beneficial for given data size and operation type.
+    ///
+    /// - Parameters:
+    ///   - elementCount: Number of elements to process.
+    ///   - operationType: Type of operation to perform.
+    /// - Returns: True if Metal is likely to be faster than CPU.
+    public static func shouldUseGPU(elementCount: Int, operationType: GPUOperationType) -> Bool {
+        let config = thresholdConfig
+
+        // Honor force flags
+        if config.forceDisableGPU { return false }
+        if config.forceEnableGPU { return true }
+
+        // Check availability
+        guard isAvailable else { return false }
+
+        // Select threshold based on operation type
+        let threshold: Int
+        switch operationType {
+        case .general:
+            threshold = config.generalThreshold
+        case .matrixMultiply:
+            threshold = config.matrixMultiplyThreshold
+        case .fft:
+            threshold = config.fftThreshold
+        case .elementWise:
+            threshold = config.elementWiseThreshold
+        }
+
+        return elementCount >= threshold
     }
 }

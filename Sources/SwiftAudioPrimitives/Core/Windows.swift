@@ -14,7 +14,14 @@ public enum WindowType: String, CaseIterable, Sendable {
 public struct Windows: Sendable {
     private init() {}
 
+    /// Cache for generated windows to avoid recomputation.
+    private static var windowCache: [String: [Float]] = [:]
+    private static let cacheLock = NSLock()
+
     /// Generate a window function of the specified type.
+    ///
+    /// Results are cached for performance - repeated calls with the same
+    /// parameters return the cached window without recomputation.
     ///
     /// - Parameters:
     ///   - type: The window function type.
@@ -26,20 +33,37 @@ public struct Windows: Sendable {
         guard length > 0 else { return [] }
         guard length > 1 else { return [1.0] }
 
+        // Check cache first
+        let key = "\(type.rawValue)_\(length)_\(periodic)"
+        cacheLock.lock()
+        if let cached = windowCache[key] {
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+
         let n = periodic ? length : length - 1
 
+        let window: [Float]
         switch type {
         case .hann:
-            return generateHann(length: length, n: n)
+            window = generateHann(length: length, n: n)
         case .hamming:
-            return generateHamming(length: length, n: n)
+            window = generateHamming(length: length, n: n)
         case .blackman:
-            return generateBlackman(length: length, n: n)
+            window = generateBlackman(length: length, n: n)
         case .bartlett:
-            return generateBartlett(length: length, n: n)
+            window = generateBartlett(length: length, n: n)
         case .rectangular:
-            return [Float](repeating: 1.0, count: length)
+            window = [Float](repeating: 1.0, count: length)
         }
+
+        // Store in cache
+        cacheLock.lock()
+        windowCache[key] = window
+        cacheLock.unlock()
+
+        return window
     }
 
     // MARK: - Private Implementation
@@ -72,12 +96,16 @@ public struct Windows: Sendable {
 
     private static func generateBlackman(length: Int, n: Int) -> [Float] {
         // Blackman: 0.42 - 0.5 * cos(2*pi*k/N) + 0.08 * cos(4*pi*k/N)
+        // Note: At k=0, the formula equals exactly 0 (0.42 - 0.5 + 0.08 = 0)
+        // but floating point precision can produce tiny negative values.
+        // We clamp to ensure non-negativity as required by window function definition.
         var window = [Float](repeating: 0, count: length)
         let scale = 2.0 * Float.pi / Float(n)
 
         for k in 0..<length {
             let angle = scale * Float(k)
-            window[k] = 0.42 - 0.5 * cos(angle) + 0.08 * cos(2.0 * angle)
+            let value = 0.42 - 0.5 * cos(angle) + 0.08 * cos(2.0 * angle)
+            window[k] = max(0, value)
         }
 
         return window

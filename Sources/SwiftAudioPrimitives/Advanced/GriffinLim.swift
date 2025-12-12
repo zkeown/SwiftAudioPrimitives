@@ -198,8 +198,14 @@ public struct GriffinLim: Sendable {
         var hasPrevious = false
 
         // Main iteration loop
+        // Following librosa's algorithm exactly:
+        // angles[:] = rebuilt
+        // if tprev is not None: angles -= momentum_scale * tprev
+        // angles /= np.abs(angles) + eps
+        // angles *= S
+        // rebuilt, tprev = tprev, rebuilt  <-- KEY: tprev gets RAW rebuilt, not momentum-adjusted!
         for iter in 0..<nIter {
-            // 1. Construct complex spectrogram from magnitude and current phase (in-place)
+            // 1. Create complex from current magnitude + phase estimate
             fromPolarInPlace(
                 magnitude: flatMagnitude,
                 phase: workspace.phase,
@@ -207,7 +213,7 @@ public struct GriffinLim: Sendable {
                 imagOut: &workspace.currentImag
             )
 
-            // 2. Convert to ComplexMatrix for ISTFT (temporary, but needed for existing API)
+            // 2. Convert to ComplexMatrix for ISTFT
             let complex = ContiguousComplexMatrix(
                 real: workspace.currentReal,
                 imag: workspace.currentImag,
@@ -218,50 +224,67 @@ public struct GriffinLim: Sendable {
             // 3. Inverse STFT to get audio estimate
             let audio = await istft.transform(complex, length: outputLength)
 
-            // 4. Forward STFT of audio estimate (this is G(c_n) = "rebuilt")
+            // 4. Forward STFT to get rebuilt spectrogram
             let reconstructed = await stft.transform(audio)
 
-            // Copy reconstructed to workspace current buffers
+            // Copy rebuilt to current buffers
             copyComplexMatrixToFlat(
                 reconstructed,
                 realOut: &workspace.currentReal,
                 imagOut: &workspace.currentImag
             )
 
-            // 5. Compute error for best-phase tracking
+            // 5. Compute error BEFORE momentum is applied (from raw rebuilt)
             let currentError = computeReconstructionErrorFlat(
                 targetMagnitude: flatMagnitude,
                 estimatedReal: workspace.currentReal,
                 estimatedImag: workspace.currentImag
             )
 
-            // Track best phase - save BEFORE momentum is applied
-            if currentError < bestError {
-                bestError = currentError
-                workspace.saveBestPhase()
+            // 6. Copy current (RAW rebuilt) to angles buffers for momentum
+            // angles[:] = rebuilt
+            workspace.anglesReal.withUnsafeMutableBufferPointer { destReal in
+                workspace.currentReal.withUnsafeBufferPointer { srcReal in
+                    memcpy(destReal.baseAddress!, srcReal.baseAddress!, nFreqs * nFrames * MemoryLayout<Float>.size)
+                }
+            }
+            workspace.anglesImag.withUnsafeMutableBufferPointer { destImag in
+                workspace.currentImag.withUnsafeBufferPointer { srcImag in
+                    memcpy(destImag.baseAddress!, srcImag.baseAddress!, nFreqs * nFrames * MemoryLayout<Float>.size)
+                }
             }
 
-            // 6. Apply Fast Griffin-Lim momentum (librosa formula) in-place
+            // 7. Apply Fast Griffin-Lim momentum to angles
+            // if tprev is not None: angles -= momentum_scale * tprev
             if momentum > 0 && hasPrevious {
                 applyMomentumInPlace(
-                    currentReal: &workspace.currentReal,
-                    currentImag: &workspace.currentImag,
-                    prevReal: workspace.prevReal,
+                    currentReal: &workspace.anglesReal,
+                    currentImag: &workspace.anglesImag,
+                    prevReal: workspace.prevReal,  // prevReal/prevImag contain RAW rebuilt from prev iter
                     prevImag: workspace.prevImag,
                     momScale: momScale
                 )
             }
 
-            // 7. Swap current to prev for next iteration (O(1) swap)
+            // 8. Swap: rebuilt, tprev = tprev, rebuilt
+            // Store RAW rebuilt (current) as prev for next iteration
             workspace.swapCurrentAndPrev()
             hasPrevious = true
 
-            // 8. Extract phase in-place from angles (now in prev buffers after swap)
+            // 9. Extract phase from momentum-adjusted angles (not from prev!)
+            // This is the normalization step: angles /= |angles| + eps; angles *= S
+            // The phase is: atan2(angles.imag, angles.real)
             extractPhaseInPlace(
-                real: workspace.prevReal,
-                imag: workspace.prevImag,
+                real: workspace.anglesReal,
+                imag: workspace.anglesImag,
                 phaseOut: &workspace.phase
             )
+
+            // Track best phase
+            if currentError < bestError {
+                bestError = currentError
+                workspace.saveBestPhase()
+            }
 
             // Report progress
             if let callback = onIteration {
