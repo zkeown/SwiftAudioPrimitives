@@ -53,7 +53,7 @@ public struct MelSpectrogram: Sendable {
         winLength: Int? = nil,
         windowType: WindowType = .hann,
         center: Bool = true,
-        padMode: PadMode = .constant(0),
+        padMode: PadMode = .reflect,
         nMels: Int = 128,
         fMin: Float = 0,
         fMax: Float? = nil,
@@ -184,11 +184,15 @@ public struct MelSpectrogram: Sendable {
         let nMels = filters.count
 
         // Flatten power spectrogram to row-major: (nFreqs × nFrames)
+        // Use memcpy for each row instead of element-by-element copy
         var flatPower = [Float](repeating: 0, count: specNFreqs * nFrames)
-        for f in 0..<specNFreqs {
-            let row = powerSpec[f]
-            for t in 0..<min(nFrames, row.count) {
-                flatPower[f * nFrames + t] = row[t]
+        flatPower.withUnsafeMutableBufferPointer { flatPtr in
+            for f in 0..<specNFreqs {
+                let row = powerSpec[f]
+                let copyLen = min(nFrames, row.count)
+                row.withUnsafeBufferPointer { rowPtr in
+                    memcpy(flatPtr.baseAddress! + f * nFrames, rowPtr.baseAddress!, copyLen * MemoryLayout<Float>.size)
+                }
             }
         }
 
@@ -213,7 +217,7 @@ public struct MelSpectrogram: Sendable {
             }
         }
 
-        // Reshape to [[Float]]
+        // Reshape to [[Float]] using Array slicing (faster than element copy)
         var melSpec = [[Float]]()
         melSpec.reserveCapacity(nMels)
         for m in 0..<nMels {

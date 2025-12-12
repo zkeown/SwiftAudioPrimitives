@@ -54,7 +54,26 @@ public struct ISTFT: Sendable {
     ///   - length: Expected output length. If nil, computed from spectrogram shape.
     /// - Returns: Reconstructed audio signal.
     public func transform(_ spectrogram: ComplexMatrix, length: Int? = nil) async -> [Float] {
+        // Convert to contiguous and use optimized implementation
+        return await transform(spectrogram.toContiguous(), length: length)
+    }
+
+    /// Reconstruct signal from contiguous complex spectrogram (optimized).
+    ///
+    /// This is the high-performance implementation using transpose-based access
+    /// for cache-friendly memory patterns.
+    ///
+    /// - Parameters:
+    ///   - spectrogram: Contiguous complex spectrogram of shape (nFreqs, nFrames).
+    ///   - length: Expected output length. If nil, computed from spectrogram shape.
+    /// - Returns: Reconstructed audio signal.
+    public func transform(_ spectrogram: ContiguousComplexMatrix, length: Int? = nil) async -> [Float] {
         let nFrames = spectrogram.cols
+        let nFreqs = config.nFreqs
+        let nFFT = config.nFFT
+        let winLength = config.winLength
+        let hopLength = config.hopLength
+
         guard nFrames > 0 else { return [] }
 
         // Compute output length
@@ -62,63 +81,146 @@ public struct ISTFT: Sendable {
         if let length = length {
             expectedLength = length
         } else {
-            // Estimate length from spectrogram dimensions
-            let uncenteredLength = config.nFFT + (nFrames - 1) * config.hopLength
-            expectedLength = config.center ? uncenteredLength - config.nFFT : uncenteredLength
+            let uncenteredLength = nFFT + (nFrames - 1) * hopLength
+            expectedLength = config.center ? uncenteredLength - nFFT : uncenteredLength
         }
 
         // Full output buffer length (with padding if centered)
         let bufferLength = config.center
-            ? expectedLength + config.nFFT
-            : config.nFFT + (nFrames - 1) * config.hopLength
+            ? expectedLength + nFFT
+            : nFFT + (nFrames - 1) * hopLength
 
-        // Compute all IFFTs first (this is the CPU-bound part)
-        var frames = [[Float]]()
-        frames.reserveCapacity(nFrames)
+        let halfN = nFFT / 2
+        let log2n = vDSP_Length(log2(Double(nFFT)))
 
-        for frameIdx in 0..<nFrames {
-            // Extract complex frame
-            var frameReal = [Float](repeating: 0, count: config.nFreqs)
-            var frameImag = [Float](repeating: 0, count: config.nFreqs)
+        // OPTIMIZATION: Transpose spectrogram from (nFreqs, nFrames) to (nFrames, nFreqs)
+        // This converts column-wise access (cache-hostile) to row-wise access (cache-friendly)
+        var transposedReal = [Float](repeating: 0, count: nFreqs * nFrames)
+        var transposedImag = [Float](repeating: 0, count: nFreqs * nFrames)
 
-            for freqIdx in 0..<config.nFreqs {
-                frameReal[freqIdx] = spectrogram.real[freqIdx][frameIdx]
-                frameImag[freqIdx] = spectrogram.imag[freqIdx][frameIdx]
+        spectrogram.real.withUnsafeBufferPointer { realPtr in
+            spectrogram.imag.withUnsafeBufferPointer { imagPtr in
+                // vDSP_mtrans: transpose from (nFreqs rows, nFrames cols) to (nFrames rows, nFreqs cols)
+                vDSP_mtrans(realPtr.baseAddress!, 1, &transposedReal, 1,
+                            vDSP_Length(nFrames), vDSP_Length(nFreqs))
+                vDSP_mtrans(imagPtr.baseAddress!, 1, &transposedImag, 1,
+                            vDSP_Length(nFrames), vDSP_Length(nFreqs))
             }
-
-            // Compute inverse FFT and truncate to window length
-            let reconstructedFrame = computeIFFT(real: frameReal, imag: frameImag)
-            frames.append(Array(reconstructedFrame.prefix(config.winLength)))
         }
 
-        // Decide GPU vs CPU for overlap-add
-        let elementCount = nFrames * config.winLength
-        var output: [Float]
+        // Use contiguous memory for frame results: nFrames × winLength
+        var frameResults = [Float](repeating: 0, count: nFrames * winLength)
 
-        if let engine = metalEngine, MetalEngine.shouldUseGPU(elementCount: elementCount) {
-            // GPU path: use Metal overlap-add kernel
-            do {
-                output = try await engine.overlapAdd(
-                    frames: frames,
-                    window: window,
-                    hopLength: config.hopLength,
-                    outputLength: bufferLength
-                )
-                // GPU overlap-add doesn't do normalization, so we need to compute windowSum
-                // and normalize manually (or use a separate kernel)
-                output = normalizeOutput(output, nFrames: nFrames, bufferLength: bufferLength)
-            } catch {
-                // Fall back to CPU on GPU error
-                output = overlapAddCPU(frames: frames, bufferLength: bufferLength)
+        let processorCount = ProcessInfo.processInfo.activeProcessorCount
+        let framesPerThread = (nFrames + processorCount - 1) / processorCount
+
+        // Parallel IFFT processing with cache-friendly access
+        frameResults.withUnsafeMutableBufferPointer { resultsPtr in
+            transposedReal.withUnsafeBufferPointer { transRealPtr in
+                transposedImag.withUnsafeBufferPointer { transImagPtr in
+                    DispatchQueue.concurrentPerform(iterations: processorCount) { threadIdx in
+                        let startFrame = threadIdx * framesPerThread
+                        let endFrame = min(startFrame + framesPerThread, nFrames)
+
+                        if startFrame >= endFrame { return }
+
+                        // Thread-local workspace
+                        var fullReal = [Float](repeating: 0, count: halfN)
+                        var fullImag = [Float](repeating: 0, count: halfN)
+                        var reconstructed = [Float](repeating: 0, count: nFFT)
+                        var scale = 1.0 / Float(nFFT)
+
+                        fullReal.withUnsafeMutableBufferPointer { fullRealPtr in
+                            fullImag.withUnsafeMutableBufferPointer { fullImagPtr in
+                                reconstructed.withUnsafeMutableBufferPointer { reconPtr in
+                                    for frameIdx in startFrame..<endFrame {
+                                        // After transpose: frame data is at row frameIdx, contiguous in memory
+                                        let frameOffset = frameIdx * nFreqs
+
+                                        // DC and Nyquist - now contiguous access
+                                        fullRealPtr[0] = transRealPtr[frameOffset]
+                                        fullImagPtr[0] = transRealPtr[frameOffset + halfN]  // Nyquist stored in real
+
+                                        // Positive frequencies - bulk copy from contiguous memory
+                                        memcpy(fullRealPtr.baseAddress! + 1,
+                                               transRealPtr.baseAddress! + frameOffset + 1,
+                                               (halfN - 1) * MemoryLayout<Float>.size)
+                                        memcpy(fullImagPtr.baseAddress! + 1,
+                                               transImagPtr.baseAddress! + frameOffset + 1,
+                                               (halfN - 1) * MemoryLayout<Float>.size)
+
+                                        // Inverse FFT
+                                        var split = DSPSplitComplex(realp: fullRealPtr.baseAddress!, imagp: fullImagPtr.baseAddress!)
+                                        vDSP_fft_zrip(self.fftSetupWrapper.setup, &split, 1, log2n, FFTDirection(kFFTDirection_Inverse))
+
+                                        // Unpack to real
+                                        vDSP_ztoc(
+                                            &split, 1,
+                                            UnsafeMutablePointer<DSPComplex>(OpaquePointer(reconPtr.baseAddress!)),
+                                            2,
+                                            vDSP_Length(halfN)
+                                        )
+
+                                        // Scale
+                                        vDSP_vsmul(reconPtr.baseAddress!, 1, &scale, reconPtr.baseAddress!, 1, vDSP_Length(nFFT))
+
+                                        // Apply window and store to contiguous output
+                                        let resultOffset = frameIdx * winLength
+                                        self.window.withUnsafeBufferPointer { windowPtr in
+                                            vDSP_vmul(reconPtr.baseAddress!, 1, windowPtr.baseAddress!, 1, resultsPtr.baseAddress! + resultOffset, 1, vDSP_Length(winLength))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
-        } else {
-            // CPU path: optimized overlap-add with vDSP
-            output = overlapAddCPU(frames: frames, bufferLength: bufferLength)
+        }
+
+        // Sequential overlap-add
+        var output = [Float](repeating: 0, count: bufferLength)
+        var windowSum = [Float](repeating: 0, count: bufferLength)
+
+        output.withUnsafeMutableBufferPointer { outPtr in
+            windowSum.withUnsafeMutableBufferPointer { sumPtr in
+                frameResults.withUnsafeBufferPointer { framePtr in
+                    for frameIdx in 0..<nFrames {
+                        let startIdx = frameIdx * hopLength
+                        let addLen = min(winLength, bufferLength - startIdx)
+                        let frameOffset = frameIdx * winLength
+
+                        vDSP_vadd(
+                            outPtr.baseAddress! + startIdx, 1,
+                            framePtr.baseAddress! + frameOffset, 1,
+                            outPtr.baseAddress! + startIdx, 1,
+                            vDSP_Length(addLen)
+                        )
+
+                        self.windowSquared.withUnsafeBufferPointer { sqPtr in
+                            vDSP_vadd(
+                                sumPtr.baseAddress! + startIdx, 1,
+                                sqPtr.baseAddress!, 1,
+                                sumPtr.baseAddress! + startIdx, 1,
+                                vDSP_Length(addLen)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Normalize by squared window sum
+        let epsilon: Float = 1e-8
+        for i in 0..<bufferLength {
+            if windowSum[i] > epsilon {
+                output[i] /= windowSum[i]
+            }
         }
 
         // Remove padding if centered
         if config.center {
-            let padLength = config.nFFT / 2
+            let padLength = nFFT / 2
             let startIdx = padLength
             let endIdx = min(startIdx + expectedLength, bufferLength)
             return Array(output[startIdx..<endIdx])

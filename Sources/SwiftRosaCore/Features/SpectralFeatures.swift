@@ -151,7 +151,7 @@ public struct SpectralFeatures: Sendable {
             winLength: config.nFFT,
             windowType: config.windowType,
             center: config.center,
-            padMode: .reflect
+            padMode: .constant(0)  // librosa default: zeros
         ))
         self.frequencies = config.frequencies
         self.workspace = SpectralFeaturesWorkspace(nFreqs: config.nFreqs)
@@ -181,25 +181,40 @@ public struct SpectralFeatures: Sendable {
         let nFreqs = magnitudeSpec.count
         let nFrames = magnitudeSpec[0].count
 
-        var result = [Float](repeating: 0, count: nFrames)
+        // Optimized approach: compute weighted sums row-wise to maximize cache efficiency
+        // For each frequency bin f, contribution to frame t is freq[f] * mag[f][t]
+        // We can vectorize this per-row
 
-        // Process each frame using vectorized operations
-        frequencies.withUnsafeBufferPointer { freqPtr in
-            for t in 0..<nFrames {
-                // Extract magnitude column for this frame (reusing workspace buffer)
-                for f in 0..<nFreqs {
-                    workspace.magCol[f] = magnitudeSpec[f][t]
+        var weightedSums = [Float](repeating: 0, count: nFrames)
+        var totalWeights = [Float](repeating: 0, count: nFrames)
+
+        // Process row by row (each row is contiguous in memory)
+        for f in 0..<nFreqs {
+            let freq = frequencies[f]
+
+            magnitudeSpec[f].withUnsafeBufferPointer { magRowPtr in
+                // Add freq * mag[f][t] to weightedSums[t] for all t
+                weightedSums.withUnsafeMutableBufferPointer { wsPtr in
+                    var freqVal = freq
+                    // weightedSums += freq * magRow
+                    vDSP_vsma(magRowPtr.baseAddress!, 1, &freqVal, wsPtr.baseAddress!, 1, wsPtr.baseAddress!, 1, vDSP_Length(nFrames))
                 }
 
-                // Compute weighted sum: dot product of frequencies and magnitudes
-                var weightedSum: Float = 0
-                vDSP_dotpr(freqPtr.baseAddress!, 1, workspace.magCol, 1, &weightedSum, vDSP_Length(nFreqs))
+                // Add mag[f][t] to totalWeights[t] for all t
+                totalWeights.withUnsafeMutableBufferPointer { twPtr in
+                    vDSP_vadd(twPtr.baseAddress!, 1, magRowPtr.baseAddress!, 1, twPtr.baseAddress!, 1, vDSP_Length(nFrames))
+                }
+            }
+        }
 
-                // Compute total weight: sum of magnitudes
-                var totalWeight: Float = 0
-                vDSP_sve(workspace.magCol, 1, &totalWeight, vDSP_Length(nFreqs))
+        // Compute centroid = weightedSums / totalWeights (with safe division)
+        var result = [Float](repeating: 0, count: nFrames)
+        vDSP_vdiv(totalWeights, 1, weightedSums, 1, &result, 1, vDSP_Length(nFrames))
 
-                result[t] = totalWeight > 0 ? weightedSum / totalWeight : 0
+        // Handle division by zero (set to 0 where totalWeight was 0)
+        for t in 0..<nFrames {
+            if totalWeights[t] == 0 {
+                result[t] = 0
             }
         }
 
@@ -221,52 +236,102 @@ public struct SpectralFeatures: Sendable {
     }
 
     /// Compute spectral bandwidth from pre-computed magnitude spectrogram.
-    public func bandwidth(magnitudeSpec: [[Float]], p: Float = 2.0) -> [Float] {
+    ///
+    /// - Parameters:
+    ///   - magnitudeSpec: Magnitude spectrogram (nFreqs, nFrames).
+    ///   - p: Order of the bandwidth (default: 2 for standard deviation).
+    ///   - norm: Whether to L1-normalize the spectrum per frame (default: true, matches librosa).
+    /// - Returns: Spectral bandwidth per frame.
+    public func bandwidth(magnitudeSpec: [[Float]], p: Float = 2.0, norm: Bool = true) -> [Float] {
         guard !magnitudeSpec.isEmpty && !magnitudeSpec[0].isEmpty else { return [] }
 
         let centroids = centroid(magnitudeSpec: magnitudeSpec)
         let nFreqs = magnitudeSpec.count
         let nFrames = magnitudeSpec[0].count
-
-        var result = [Float](repeating: 0, count: nFrames)
         let invP = 1.0 / p
 
-        frequencies.withUnsafeBufferPointer { freqPtr in
+        // First compute per-frame normalization factors (L1 norm of each frame's spectrum)
+        var normFactors = [Float](repeating: 0, count: nFrames)
+        if norm {
+            for f in 0..<nFreqs {
+                magnitudeSpec[f].withUnsafeBufferPointer { magRowPtr in
+                    normFactors.withUnsafeMutableBufferPointer { nfPtr in
+                        vDSP_vadd(nfPtr.baseAddress!, 1, magRowPtr.baseAddress!, 1, nfPtr.baseAddress!, 1, vDSP_Length(nFrames))
+                    }
+                }
+            }
+            // Invert non-zero factors
             for t in 0..<nFrames {
-                let cent = centroids[t]
+                normFactors[t] = normFactors[t] > 0 ? 1.0 / normFactors[t] : 0
+            }
+        }
 
-                // Extract magnitude column for this frame (reusing workspace buffer)
-                for f in 0..<nFreqs {
-                    workspace.magCol[f] = magnitudeSpec[f][t]
+        // Row-wise accumulation of weighted deviation^p
+        // For each frequency f, for each frame t:
+        //   contribution = |freq[f] - centroid[t]|^p * mag[f][t] * normFactor[t]
+        var weightedSums = [Float](repeating: 0, count: nFrames)
+
+        // Temporary buffers for per-row processing
+        var deviations = [Float](repeating: 0, count: nFrames)
+        var weightedRow = [Float](repeating: 0, count: nFrames)
+
+        for f in 0..<nFreqs {
+            let freq = frequencies[f]
+
+            // Compute |freq - centroid[t]| for all frames
+            centroids.withUnsafeBufferPointer { centPtr in
+                deviations.withUnsafeMutableBufferPointer { devPtr in
+                    var negFreq = -freq
+                    // deviations = centroid - freq
+                    vDSP_vsadd(centPtr.baseAddress!, 1, &negFreq, devPtr.baseAddress!, 1, vDSP_Length(nFrames))
+                    // deviations = |deviations|
+                    vDSP_vabs(devPtr.baseAddress!, 1, devPtr.baseAddress!, 1, vDSP_Length(nFrames))
                 }
+            }
 
-                // Compute deviations: |freq - centroid| (reusing workspace buffer)
-                var negCent = -cent
-                vDSP_vsadd(freqPtr.baseAddress!, 1, &negCent, &workspace.deviations, 1, vDSP_Length(nFreqs))
-                vDSP_vabs(workspace.deviations, 1, &workspace.deviations, 1, vDSP_Length(nFreqs))
+            // Compute deviation^p
+            if p == 2.0 {
+                vDSP_vsq(deviations, 1, &deviations, 1, vDSP_Length(nFrames))
+            } else {
+                var pVar = p
+                var n = Int32(nFrames)
+                vvpowsf(&deviations, &pVar, deviations, &n)
+            }
 
-                // Compute deviation^p
-                if p == 2.0 {
-                    // Special case: use squared (faster)
-                    vDSP_vsq(workspace.deviations, 1, &workspace.deviations, 1, vDSP_Length(nFreqs))
-                } else {
-                    // General case: element-wise power
-                    var pVar = p
-                    var n = Int32(nFreqs)
-                    vvpowsf(&workspace.deviations, &pVar, workspace.deviations, &n)
+            // Multiply by magnitude row: deviation^p * mag[f][:]
+            magnitudeSpec[f].withUnsafeBufferPointer { magRowPtr in
+                weightedRow.withUnsafeMutableBufferPointer { wrPtr in
+                    vDSP_vmul(deviations, 1, magRowPtr.baseAddress!, 1, wrPtr.baseAddress!, 1, vDSP_Length(nFrames))
                 }
+            }
 
-                // Compute weighted sum: dot product of deviation^p and magnitudes
-                var weightedSum: Float = 0
-                vDSP_dotpr(workspace.deviations, 1, workspace.magCol, 1, &weightedSum, vDSP_Length(nFreqs))
-
-                // Compute total weight: sum of magnitudes
-                var totalWeight: Float = 0
-                vDSP_sve(workspace.magCol, 1, &totalWeight, vDSP_Length(nFreqs))
-
-                if totalWeight > 0 {
-                    result[t] = pow(weightedSum / totalWeight, invP)
+            // If normalizing, multiply by normFactors
+            if norm {
+                weightedRow.withUnsafeMutableBufferPointer { wrPtr in
+                    normFactors.withUnsafeBufferPointer { nfPtr in
+                        vDSP_vmul(wrPtr.baseAddress!, 1, nfPtr.baseAddress!, 1, wrPtr.baseAddress!, 1, vDSP_Length(nFrames))
+                    }
                 }
+            }
+
+            // Accumulate into weightedSums
+            weightedSums.withUnsafeMutableBufferPointer { wsPtr in
+                weightedRow.withUnsafeBufferPointer { wrPtr in
+                    vDSP_vadd(wsPtr.baseAddress!, 1, wrPtr.baseAddress!, 1, wsPtr.baseAddress!, 1, vDSP_Length(nFrames))
+                }
+            }
+        }
+
+        // Take p-th root of accumulated sums
+        var result = [Float](repeating: 0, count: nFrames)
+        if p == 2.0 {
+            // Fast path: sqrt
+            var n = Int32(nFrames)
+            vvsqrtf(&result, weightedSums, &n)
+        } else {
+            // General: pow(x, 1/p)
+            for t in 0..<nFrames {
+                result[t] = pow(weightedSums[t], invP)
             }
         }
 
@@ -294,28 +359,39 @@ public struct SpectralFeatures: Sendable {
         let nFreqs = magnitudeSpec.count
         let nFrames = magnitudeSpec[0].count
 
+        // Compute total energy per frame (row-wise for cache efficiency)
+        var totalEnergy = [Float](repeating: 0, count: nFrames)
+        for f in 0..<nFreqs {
+            magnitudeSpec[f].withUnsafeBufferPointer { magRowPtr in
+                totalEnergy.withUnsafeMutableBufferPointer { tePtr in
+                    vDSP_vadd(tePtr.baseAddress!, 1, magRowPtr.baseAddress!, 1, tePtr.baseAddress!, 1, vDSP_Length(nFrames))
+                }
+            }
+        }
+
+        // Compute thresholds
+        var thresholds = [Float](repeating: 0, count: nFrames)
+        var percent = rollPercent
+        vDSP_vsmul(totalEnergy, 1, &percent, &thresholds, 1, vDSP_Length(nFrames))
+
+        // Parallel rolloff computation using GCD
+        // Each frame can be computed independently once we have the threshold
         var result = [Float](repeating: 0, count: nFrames)
 
-        for t in 0..<nFrames {
-            // Extract magnitude column for this frame (reusing workspace buffer)
-            for f in 0..<nFreqs {
-                workspace.magCol[f] = magnitudeSpec[f][t]
-            }
+        result.withUnsafeMutableBufferPointer { resultPtr in
+            thresholds.withUnsafeBufferPointer { threshPtr in
+                DispatchQueue.concurrentPerform(iterations: nFrames) { t in
+                    let threshold = threshPtr[t]
+                    var cumSum: Float = 0
 
-            // Compute total energy using vDSP_sve
-            var totalEnergy: Float = 0
-            vDSP_sve(workspace.magCol, 1, &totalEnergy, vDSP_Length(nFreqs))
-
-            let threshold = totalEnergy * rollPercent
-
-            // Compute cumulative sum inline (no need to store full array)
-            // Early exit when threshold is reached
-            var runningSum: Float = 0
-            for f in 0..<nFreqs {
-                runningSum += workspace.magCol[f]
-                if runningSum >= threshold {
-                    result[t] = frequencies[f]
-                    break
+                    // Find the frequency bin where cumulative sum exceeds threshold
+                    for f in 0..<nFreqs {
+                        cumSum += magnitudeSpec[f][t]
+                        if cumSum >= threshold {
+                            resultPtr[t] = frequencies[f]
+                            break
+                        }
+                    }
                 }
             }
         }
@@ -336,38 +412,74 @@ public struct SpectralFeatures: Sendable {
     }
 
     /// Compute spectral flatness from pre-computed magnitude spectrogram.
-    public func flatness(magnitudeSpec: [[Float]]) -> [Float] {
+    public func flatness(magnitudeSpec: [[Float]], power: Float = 2.0) -> [Float] {
         guard !magnitudeSpec.isEmpty && !magnitudeSpec[0].isEmpty else { return [] }
 
         let nFreqs = magnitudeSpec.count
         let nFrames = magnitudeSpec[0].count
         let amin: Float = 1e-10
-
-        var result = [Float](repeating: 0, count: nFrames)
         let invNFreqs = 1.0 / Float(nFreqs)
 
-        for t in 0..<nFrames {
-            // Extract magnitude column for this frame (reusing workspace buffer)
-            for f in 0..<nFreqs {
-                workspace.magCol[f] = max(magnitudeSpec[f][t], amin)
+        // Row-wise computation for better cache efficiency
+        // Compute sum of logs and arithmetic sum per frame
+
+        var logSums = [Float](repeating: 0, count: nFrames)
+        var arithmeticSums = [Float](repeating: 0, count: nFrames)
+
+        // Temporary buffer for per-row processing
+        var rowPower = [Float](repeating: 0, count: nFrames)
+        var rowLog = [Float](repeating: 0, count: nFrames)
+
+        for f in 0..<nFreqs {
+            magnitudeSpec[f].withUnsafeBufferPointer { magRowPtr in
+                rowPower.withUnsafeMutableBufferPointer { rpPtr in
+                    // Apply power to row
+                    if power == 2.0 {
+                        // Fast path for squared
+                        vDSP_vsq(magRowPtr.baseAddress!, 1, rpPtr.baseAddress!, 1, vDSP_Length(nFrames))
+                    } else {
+                        // General power - copy first then apply
+                        memcpy(rpPtr.baseAddress!, magRowPtr.baseAddress!, nFrames * MemoryLayout<Float>.size)
+                        var p = power
+                        var n = Int32(nFrames)
+                        vvpowsf(rpPtr.baseAddress!, &p, rpPtr.baseAddress!, &n)
+                    }
+
+                    // Clamp to amin
+                    var aminVal = amin
+                    vDSP_vthr(rpPtr.baseAddress!, 1, &aminVal, rpPtr.baseAddress!, 1, vDSP_Length(nFrames))
+                }
             }
 
-            // Compute log of magnitudes using vForce (reusing workspace buffer)
-            var n = Int32(nFreqs)
-            vvlogf(&workspace.logMag, workspace.magCol, &n)
+            // Compute log of powered values
+            rowLog.withUnsafeMutableBufferPointer { rlPtr in
+                rowPower.withUnsafeBufferPointer { rpPtr in
+                    var n = Int32(nFrames)
+                    vvlogf(rlPtr.baseAddress!, rpPtr.baseAddress!, &n)
+                }
+            }
 
-            // Compute sum of logs (for geometric mean)
-            var logSum: Float = 0
-            vDSP_sve(workspace.logMag, 1, &logSum, vDSP_Length(nFreqs))
+            // Accumulate log sums
+            logSums.withUnsafeMutableBufferPointer { lsPtr in
+                rowLog.withUnsafeBufferPointer { rlPtr in
+                    vDSP_vadd(lsPtr.baseAddress!, 1, rlPtr.baseAddress!, 1, lsPtr.baseAddress!, 1, vDSP_Length(nFrames))
+                }
+            }
 
-            // Compute arithmetic sum
-            var arithmeticSum: Float = 0
-            vDSP_sve(workspace.magCol, 1, &arithmeticSum, vDSP_Length(nFreqs))
+            // Accumulate arithmetic sums
+            arithmeticSums.withUnsafeMutableBufferPointer { asPtr in
+                rowPower.withUnsafeBufferPointer { rpPtr in
+                    vDSP_vadd(asPtr.baseAddress!, 1, rpPtr.baseAddress!, 1, asPtr.baseAddress!, 1, vDSP_Length(nFrames))
+                }
+            }
+        }
 
-            // Geometric mean = exp(mean(log(x)))
-            let geometricMean = exp(logSum * invNFreqs)
-            let arithmeticMean = arithmeticSum * invNFreqs
+        // Compute flatness for all frames
+        var result = [Float](repeating: 0, count: nFrames)
 
+        for t in 0..<nFrames {
+            let geometricMean = exp(logSums[t] * invNFreqs)
+            let arithmeticMean = arithmeticSums[t] * invNFreqs
             result[t] = arithmeticMean > amin ? geometricMean / arithmeticMean : 0
         }
 
@@ -462,8 +574,6 @@ public struct SpectralFeatures: Sendable {
         let nFrames = magnitudeSpec[0].count
 
         // Compute octave band edges to match librosa's approach
-        // librosa creates n_bands + 2 octave edges: [0, fMin, 2*fMin, 4*fMin, ..., 2^nBands * fMin]
-        // Then iterates through n_bands + 1 pairs
         let freqResolution = config.sampleRate / Float(config.nFFT)
         var bandEdges = [Int]()
 
@@ -477,48 +587,116 @@ public struct SpectralFeatures: Sendable {
             bandEdges.append(bin)
         }
 
-        // Total edges: 1 (DC) + (nBands + 1) frequencies = nBands + 2 edges
-        // This gives nBands + 1 bands (pairs of edges)
         let nOutputBands = bandEdges.count - 1
-        var result = [[Float]]()
-        result.reserveCapacity(nOutputBands)
-
         let amin: Float = 1e-10
 
-        for band in 0..<nOutputBands {
+        // Pre-allocate result array
+        var result = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: nOutputBands)
+
+        // Process bands in parallel
+        DispatchQueue.concurrentPerform(iterations: nOutputBands) { band in
             let startBin = bandEdges[band]
             let endBin = bandEdges[band + 1]
             let bandSize = endBin - startBin
 
-            guard bandSize > 0 else {
-                result.append([Float](repeating: 0, count: nFrames))
-                continue
-            }
+            guard bandSize > 0 else { return }
 
-            var bandContrast = [Float](repeating: 0, count: nFrames)
             let nQuantile = max(1, Int(Float(bandSize) * quantile))
 
-            for t in 0..<nFrames {
-                // Extract band magnitudes into workspace buffer (reusing allocation)
-                for i in 0..<bandSize {
-                    workspace.bandMags[i] = magnitudeSpec[startBin + i][t]
+            // Process frames in parallel within each band
+            // Use thread-local buffer for band magnitudes
+            result[band].withUnsafeMutableBufferPointer { bandResultPtr in
+                DispatchQueue.concurrentPerform(iterations: nFrames) { t in
+                    // Thread-local buffer for band magnitudes
+                    var bandMags = [Float](repeating: 0, count: bandSize)
+
+                    // Extract band magnitudes for this frame
+                    for i in 0..<bandSize {
+                        bandMags[i] = magnitudeSpec[startBin + i][t]
+                    }
+
+                    // Compute quantile means using optimized sorting
+                    let (valleyMean, peakMean) = Self.computeQuantileMeansStatic(
+                        &bandMags, count: bandSize, nQuantile: nQuantile
+                    )
+
+                    // Contrast in dB
+                    bandResultPtr[t] = log10(max(peakMean, amin)) - log10(max(valleyMean, amin))
                 }
-
-                // Use partial sort approach: find min/max quantiles without full sort
-                // For small quantiles (typical 2%), this is much faster than full sort
-                // Use workspace.bandMags directly (not a stale copy)
-                let (valleyMean, peakMean) = computeQuantileMeans(
-                    workspace.bandMags, count: bandSize, nQuantile: nQuantile
-                )
-
-                // Contrast in dB
-                bandContrast[t] = log10(max(peakMean, amin)) - log10(max(valleyMean, amin))
             }
-
-            result.append(bandContrast)
         }
 
         return result
+    }
+
+    /// Static version of quantile means for thread-safe parallel use.
+    private static func computeQuantileMeansStatic(
+        _ data: inout [Float],
+        count: Int,
+        nQuantile: Int
+    ) -> (valley: Float, peak: Float) {
+        // For very small arrays, just sort
+        if count <= 32 {
+            data[0..<count].sort()
+
+            var valleySum: Float = 0
+            for i in 0..<nQuantile {
+                valleySum += data[i]
+            }
+
+            var peakSum: Float = 0
+            for i in (count - nQuantile)..<count {
+                peakSum += data[i]
+            }
+
+            return (valleySum / Float(nQuantile), peakSum / Float(nQuantile))
+        }
+
+        // Use nth_element-style partial sort for larger arrays
+        // Find the nQuantile-th smallest and (count - nQuantile)-th elements
+        partialSortStatic(&data, count: count, k: nQuantile)
+
+        var valleySum: Float = 0
+        for i in 0..<nQuantile {
+            valleySum += data[i]
+        }
+
+        // Need to re-partition for top quantile
+        partialSortStatic(&data, count: count, k: count - nQuantile)
+
+        var peakSum: Float = 0
+        for i in (count - nQuantile)..<count {
+            peakSum += data[i]
+        }
+
+        return (valleySum / Float(nQuantile), peakSum / Float(nQuantile))
+    }
+
+    /// Static QuickSelect for thread-safe parallel use.
+    private static func partialSortStatic(_ array: inout [Float], count: Int, k: Int) {
+        guard k > 0 && k < count else { return }
+
+        var left = 0
+        var right = count - 1
+
+        while left < right {
+            let pivot = array[(left + right) / 2]
+            var i = left
+            var j = right
+
+            while i <= j {
+                while array[i] < pivot { i += 1 }
+                while array[j] > pivot { j -= 1 }
+                if i <= j {
+                    array.swapAt(i, j)
+                    i += 1
+                    j -= 1
+                }
+            }
+
+            if j < k { left = i }
+            if k < i { right = j }
+        }
     }
 
     /// Compute mean of bottom and top quantiles efficiently.
@@ -688,13 +866,22 @@ public struct SpectralFeatures: Sendable {
     }
 
     /// Compute spectral bandwidth from contiguous magnitude spectrogram.
-    public func bandwidthContiguous(magnitudeSpec: ContiguousMatrix, p: Float = 2.0) -> [Float] {
+    ///
+    /// - Parameters:
+    ///   - magnitudeSpec: Contiguous magnitude spectrogram (nFreqs × nFrames).
+    ///   - p: Order of the bandwidth (default: 2 for standard deviation).
+    ///   - norm: Whether to L1-normalize the spectrum per frame (default: true, matches librosa).
+    /// - Returns: Spectral bandwidth per frame.
+    public func bandwidthContiguous(magnitudeSpec: ContiguousMatrix, p: Float = 2.0, norm: Bool = true) -> [Float] {
         guard magnitudeSpec.rows > 0 && magnitudeSpec.cols > 0 else { return [] }
 
         let centroids = centroidContiguous(magnitudeSpec: magnitudeSpec)
         let nFreqs = magnitudeSpec.rows
         let nFrames = magnitudeSpec.cols
         let invP = 1.0 / p
+
+        // Relative noise floor threshold (same as non-contiguous version)
+        let noiseFloorThreshold: Float = 1e-4
 
         var result = [Float](repeating: 0, count: nFrames)
 
@@ -706,6 +893,26 @@ public struct SpectralFeatures: Sendable {
                     // Extract column into workspace (required for subsequent operations)
                     for f in 0..<nFreqs {
                         workspace.magCol[f] = magPtr[f * nFrames + t]
+                    }
+
+                    // Apply relative noise floor threshold to suppress FFT numerical noise
+                    var maxMag: Float = 0
+                    vDSP_maxv(workspace.magCol, 1, &maxMag, vDSP_Length(nFreqs))
+                    let threshold = maxMag * noiseFloorThreshold
+                    for f in 0..<nFreqs {
+                        if workspace.magCol[f] < threshold {
+                            workspace.magCol[f] = 0
+                        }
+                    }
+
+                    // L1 normalize the magnitude column if requested (librosa default: norm=True)
+                    if norm {
+                        var sum: Float = 0
+                        vDSP_sve(workspace.magCol, 1, &sum, vDSP_Length(nFreqs))
+                        if sum > 0 {
+                            var invSum = 1.0 / sum
+                            vDSP_vsmul(workspace.magCol, 1, &invSum, &workspace.magCol, 1, vDSP_Length(nFreqs))
+                        }
                     }
 
                     // Compute deviations: |freq - centroid|
@@ -722,14 +929,19 @@ public struct SpectralFeatures: Sendable {
                         vvpowsf(&workspace.deviations, &pVar, workspace.deviations, &n)
                     }
 
-                    // Weighted sum and total weight - use workspace arrays directly (not copies)
+                    // Compute weighted sum
                     var weightedSum: Float = 0
-                    var totalWeight: Float = 0
                     vDSP_dotpr(workspace.deviations, 1, workspace.magCol, 1, &weightedSum, vDSP_Length(nFreqs))
-                    vDSP_sve(workspace.magCol, 1, &totalWeight, vDSP_Length(nFreqs))
 
-                    if totalWeight > 0 {
-                        result[t] = pow(weightedSum / totalWeight, invP)
+                    // For normalized spectra, total weight = 1.0
+                    if norm {
+                        result[t] = pow(weightedSum, invP)
+                    } else {
+                        var totalWeight: Float = 0
+                        vDSP_sve(workspace.magCol, 1, &totalWeight, vDSP_Length(nFreqs))
+                        if totalWeight > 0 {
+                            result[t] = pow(weightedSum / totalWeight, invP)
+                        }
                     }
                 }
             }

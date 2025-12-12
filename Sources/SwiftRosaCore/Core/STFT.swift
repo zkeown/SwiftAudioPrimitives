@@ -105,23 +105,42 @@ public final class STFTWorkspace: @unchecked Sendable {
     }
 }
 
-/// Short-Time Fourier Transform.
+/// Short-Time Fourier Transform with automatic GPU/CPU dispatch.
+///
+/// Uses Metal GPU acceleration for large signals and optimized
+/// vDSP operations for CPU fallback.
 public struct STFT: Sendable {
     public let config: STFTConfig
 
     private let window: [Float]
     private let fftSetupWrapper: FFTSetupWrapper
 
+    /// Optional Metal engine for GPU acceleration.
+    private let metalEngine: MetalEngine?
+
+    /// Whether to prefer GPU acceleration when available.
+    public let useGPU: Bool
+
     /// Create STFT processor.
     ///
-    /// - Parameter config: STFT configuration.
-    public init(config: STFTConfig = STFTConfig()) {
+    /// - Parameters:
+    ///   - config: STFT configuration.
+    ///   - useGPU: Prefer GPU acceleration when available (default: true).
+    public init(config: STFTConfig = STFTConfig(), useGPU: Bool = true) {
         self.config = config
+        self.useGPU = useGPU
         self.window = Windows.generate(config.windowType, length: config.winLength, periodic: true)
 
         // Create FFT setup
         let log2n = vDSP_Length(log2(Double(config.nFFT)))
         self.fftSetupWrapper = FFTSetupWrapper(log2n: log2n)
+
+        // Initialize Metal engine if GPU is preferred and available
+        if useGPU && MetalEngine.isAvailable {
+            self.metalEngine = try? MetalEngine()
+        } else {
+            self.metalEngine = nil
+        }
     }
 
     /// Compute STFT of a signal.
@@ -139,43 +158,119 @@ public struct STFT: Sendable {
             return ComplexMatrix(real: [], imag: [])
         }
 
-        // Create workspace once for all frames (major optimization)
-        let workspace = STFTWorkspace(nFFT: config.nFFT)
+        let nFFT = config.nFFT
+        let nFreqs = config.nFreqs
+        let winLength = config.winLength
+        let halfN = nFFT / 2
+        let log2n = vDSP_Length(log2(Double(nFFT)))
 
-        // Apply window to each frame and compute FFT
-        var realResult = [[Float]]()
-        var imagResult = [[Float]]()
-        realResult.reserveCapacity(config.nFreqs)
-        imagResult.reserveCapacity(config.nFreqs)
+        // OPTIMIZED: Use frame-major output layout for cache-friendly writes
+        // Then transpose at the end (single pass)
+        var realFrameMajor = [Float](repeating: 0, count: nFrames * nFreqs)
+        var imagFrameMajor = [Float](repeating: 0, count: nFrames * nFreqs)
 
-        // Initialize output arrays
-        for _ in 0..<config.nFreqs {
-            realResult.append([Float](repeating: 0, count: nFrames))
-            imagResult.append([Float](repeating: 0, count: nFrames))
+        // Process frames in parallel using GCD for better performance
+        let processorCount = ProcessInfo.processInfo.activeProcessorCount
+        let framesPerThread = (nFrames + processorCount - 1) / processorCount
+
+        paddedSignal.withUnsafeBufferPointer { signalPtr in
+            window.withUnsafeBufferPointer { windowPtr in
+                realFrameMajor.withUnsafeMutableBufferPointer { outRealPtr in
+                    imagFrameMajor.withUnsafeMutableBufferPointer { outImagPtr in
+                        DispatchQueue.concurrentPerform(iterations: processorCount) { threadIdx in
+                            let startFrame = threadIdx * framesPerThread
+                            let endFrame = min(startFrame + framesPerThread, nFrames)
+
+                            if startFrame >= endFrame { return }
+
+                            // Thread-local workspace
+                            var windowedFrame = [Float](repeating: 0, count: nFFT)
+                            var splitReal = [Float](repeating: 0, count: halfN)
+                            var splitImag = [Float](repeating: 0, count: halfN)
+                            var scale: Float = 0.5
+
+                            windowedFrame.withUnsafeMutableBufferPointer { framePtr in
+                                splitReal.withUnsafeMutableBufferPointer { realPtr in
+                                    splitImag.withUnsafeMutableBufferPointer { imagPtr in
+                                        var split = DSPSplitComplex(realp: realPtr.baseAddress!, imagp: imagPtr.baseAddress!)
+
+                                        for frameIdx in startFrame..<endFrame {
+                                            let startIdx = indices[frameIdx]
+
+                                            // Zero the frame buffer
+                                            vDSP_vclr(framePtr.baseAddress!, 1, vDSP_Length(nFFT))
+
+                                            // Window the frame
+                                            let availableSamples = min(startIdx + winLength, paddedSignal.count) - startIdx
+                                            vDSP_vmul(
+                                                signalPtr.baseAddress! + startIdx, 1,
+                                                windowPtr.baseAddress!, 1,
+                                                framePtr.baseAddress!, 1,
+                                                vDSP_Length(min(availableSamples, winLength))
+                                            )
+
+                                            // Pack into split complex
+                                            vDSP_ctoz(
+                                                UnsafePointer<DSPComplex>(OpaquePointer(framePtr.baseAddress!)),
+                                                2,
+                                                &split,
+                                                1,
+                                                vDSP_Length(halfN)
+                                            )
+
+                                            // FFT
+                                            vDSP_fft_zrip(self.fftSetupWrapper.setup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
+                                            vDSP_vsmul(split.realp, 1, &scale, split.realp, 1, vDSP_Length(halfN))
+                                            vDSP_vsmul(split.imagp, 1, &scale, split.imagp, 1, vDSP_Length(halfN))
+
+                                            // OPTIMIZED: Write to frame-major layout (contiguous per frame)
+                                            let frameOffset = frameIdx * nFreqs
+
+                                            // DC component
+                                            outRealPtr[frameOffset] = split.realp[0]
+                                            outImagPtr[frameOffset] = 0
+
+                                            // Positive frequencies (contiguous copy)
+                                            memcpy(outRealPtr.baseAddress! + frameOffset + 1,
+                                                   realPtr.baseAddress! + 1,
+                                                   (halfN - 1) * MemoryLayout<Float>.size)
+                                            memcpy(outImagPtr.baseAddress! + frameOffset + 1,
+                                                   imagPtr.baseAddress! + 1,
+                                                   (halfN - 1) * MemoryLayout<Float>.size)
+
+                                            // Nyquist
+                                            outRealPtr[frameOffset + halfN] = split.imagp[0]
+                                            outImagPtr[frameOffset + halfN] = 0
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        // Process each frame with reusable workspace
-        // Access signal directly via indices to avoid frame copies
-        paddedSignal.withUnsafeBufferPointer { signalPtr in
-            for (frameIdx, startIdx) in indices.enumerated() {
-                // Zero out the windowed frame buffer first
-                workspace.windowedFrame.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
+        // Transpose from frame-major (nFrames × nFreqs) to freq-major (nFreqs × nFrames)
+        // Use vDSP_mtrans for efficient transpose, then slice
+        var transposedReal = [Float](repeating: 0, count: nFreqs * nFrames)
+        var transposedImag = [Float](repeating: 0, count: nFreqs * nFrames)
 
-                // Window directly from signal (no intermediate copy)
-                let frameEnd = min(startIdx + config.winLength, paddedSignal.count)
-                let availableSamples = frameEnd - startIdx
+        vDSP_mtrans(realFrameMajor, 1, &transposedReal, 1, vDSP_Length(nFreqs), vDSP_Length(nFrames))
+        vDSP_mtrans(imagFrameMajor, 1, &transposedImag, 1, vDSP_Length(nFreqs), vDSP_Length(nFrames))
 
-                for i in 0..<min(availableSamples, config.winLength) {
-                    workspace.windowedFrame[i] = signalPtr[startIdx + i] * window[i]
-                }
+        // Build result arrays using slicing (single allocation per row via Array init)
+        var realResult = [[Float]]()
+        var imagResult = [[Float]]()
+        realResult.reserveCapacity(nFreqs)
+        imagResult.reserveCapacity(nFreqs)
 
-                // Compute FFT using workspace buffers
-                computeFFTWithWorkspace(workspace)
-
-                // Store results (only positive frequencies)
-                for freqIdx in 0..<config.nFreqs {
-                    realResult[freqIdx][frameIdx] = workspace.fftReal[freqIdx]
-                    imagResult[freqIdx][frameIdx] = workspace.fftImag[freqIdx]
+        transposedReal.withUnsafeBufferPointer { realPtr in
+            transposedImag.withUnsafeBufferPointer { imagPtr in
+                for f in 0..<nFreqs {
+                    let start = f * nFrames
+                    realResult.append(Array(UnsafeBufferPointer(start: realPtr.baseAddress! + start, count: nFrames)))
+                    imagResult.append(Array(UnsafeBufferPointer(start: imagPtr.baseAddress! + start, count: nFrames)))
                 }
             }
         }
@@ -185,32 +280,182 @@ public struct STFT: Sendable {
 
     /// Compute magnitude spectrogram.
     ///
+    /// Uses GPU acceleration for large signals when available.
+    ///
     /// - Parameter signal: Input audio signal.
     /// - Returns: Magnitude spectrogram of shape (nFreqs, nFrames).
     public func magnitude(_ signal: [Float]) async -> [[Float]] {
+        let paddedSignal = config.center ? padSignal(signal) : signal
+        let indices = frameIndices(paddedSignal.count)
+        let nFrames = indices.count
+
+        guard nFrames > 0 else { return [] }
+
+        let nFFT = config.nFFT
+        let nFreqs = config.nFreqs
+        let elementCount = nFFT * nFrames
+
+        // Try GPU path for large data
+        if let engine = metalEngine,
+           MetalEngine.shouldUseGPU(elementCount: elementCount, operationType: .fft)
+        {
+            // Prepare windowed frames for GPU
+            var flatFrames = [Float](repeating: 0, count: nFFT * nFrames)
+
+            paddedSignal.withUnsafeBufferPointer { signalPtr in
+                window.withUnsafeBufferPointer { windowPtr in
+                    flatFrames.withUnsafeMutableBufferPointer { framesPtr in
+                        for (frameIdx, startIdx) in indices.enumerated() {
+                            let frameStart = frameIdx * nFFT
+                            let availableSamples = min(startIdx + config.winLength, paddedSignal.count) - startIdx
+
+                            // Window the frame directly into flat array
+                            vDSP_vmul(
+                                signalPtr.baseAddress! + startIdx, 1,
+                                windowPtr.baseAddress!, 1,
+                                framesPtr.baseAddress! + frameStart, 1,
+                                vDSP_Length(min(availableSamples, config.winLength))
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Use GPU STFT magnitude
+            do {
+                let contiguousMag = try await engine.stftMagnitude(
+                    frames: flatFrames,
+                    nFFT: nFFT,
+                    nFrames: nFrames
+                )
+
+                // Convert to [[Float]] format
+                var result = [[Float]]()
+                result.reserveCapacity(nFreqs)
+                for f in 0..<nFreqs {
+                    let start = f * nFrames
+                    result.append(Array(contiguousMag.data[start..<(start + nFrames)]))
+                }
+                return result
+            } catch {
+                // Fall through to CPU on GPU error
+            }
+        }
+
+        // CPU fallback
         let spectrogram = await transform(signal)
         return spectrogram.magnitude
     }
 
     /// Compute power spectrogram (magnitude squared).
     ///
+    /// Uses GPU acceleration for large signals when available.
+    /// Optimized to compute power directly without intermediate sqrt.
+    ///
     /// - Parameter signal: Input audio signal.
     /// - Returns: Power spectrogram of shape (nFreqs, nFrames).
     public func power(_ signal: [Float]) async -> [[Float]] {
-        let spectrogram = await transform(signal)
+        let paddedSignal = config.center ? padSignal(signal) : signal
+        let indices = frameIndices(paddedSignal.count)
+        let nFrames = indices.count
 
-        // Compute power directly from real/imag as r² + i² (avoids sqrt precision loss)
-        var result = [[Float]]()
-        result.reserveCapacity(spectrogram.rows)
+        guard nFrames > 0 else { return [] }
 
-        for f in 0..<spectrogram.rows {
-            var powerRow = [Float](repeating: 0, count: spectrogram.cols)
-            for t in 0..<spectrogram.cols {
-                let r = spectrogram.real[f][t]
-                let i = spectrogram.imag[f][t]
-                powerRow[t] = r * r + i * i
+        let nFFT = config.nFFT
+        let nFreqs = config.nFreqs
+        let winLength = config.winLength
+        let halfN = nFFT / 2
+        let log2n = vDSP_Length(log2(Double(nFFT)))
+
+        // OPTIMIZED: Compute power directly (real² + imag²) without sqrt
+        // Use frame-major output layout for cache-friendly writes
+        var powerFrameMajor = [Float](repeating: 0, count: nFrames * nFreqs)
+
+        let processorCount = ProcessInfo.processInfo.activeProcessorCount
+        let framesPerThread = (nFrames + processorCount - 1) / processorCount
+
+        paddedSignal.withUnsafeBufferPointer { signalPtr in
+            window.withUnsafeBufferPointer { windowPtr in
+                powerFrameMajor.withUnsafeMutableBufferPointer { outPtr in
+                    DispatchQueue.concurrentPerform(iterations: processorCount) { threadIdx in
+                        let startFrame = threadIdx * framesPerThread
+                        let endFrame = min(startFrame + framesPerThread, nFrames)
+
+                        if startFrame >= endFrame { return }
+
+                        // Thread-local workspace (pre-allocate all buffers)
+                        var windowedFrame = [Float](repeating: 0, count: nFFT)
+                        var splitReal = [Float](repeating: 0, count: halfN)
+                        var splitImag = [Float](repeating: 0, count: halfN)
+                        var powerBuf = [Float](repeating: 0, count: nFreqs)
+                        var scale: Float = 0.5
+
+                        windowedFrame.withUnsafeMutableBufferPointer { framePtr in
+                            splitReal.withUnsafeMutableBufferPointer { realPtr in
+                                splitImag.withUnsafeMutableBufferPointer { imagPtr in
+                                    powerBuf.withUnsafeMutableBufferPointer { powerPtr in
+                                        var split = DSPSplitComplex(realp: realPtr.baseAddress!, imagp: imagPtr.baseAddress!)
+
+                                        for frameIdx in startFrame..<endFrame {
+                                            let startIdx = indices[frameIdx]
+
+                                            // Zero the frame buffer
+                                            vDSP_vclr(framePtr.baseAddress!, 1, vDSP_Length(nFFT))
+
+                                            // Window the frame
+                                            let availableSamples = min(startIdx + winLength, paddedSignal.count) - startIdx
+                                            vDSP_vmul(
+                                                signalPtr.baseAddress! + startIdx, 1,
+                                                windowPtr.baseAddress!, 1,
+                                                framePtr.baseAddress!, 1,
+                                                vDSP_Length(min(availableSamples, winLength))
+                                            )
+
+                                            // Pack into split complex
+                                            vDSP_ctoz(
+                                                UnsafePointer<DSPComplex>(OpaquePointer(framePtr.baseAddress!)),
+                                                2,
+                                                &split,
+                                                1,
+                                                vDSP_Length(halfN)
+                                            )
+
+                                            // FFT
+                                            vDSP_fft_zrip(self.fftSetupWrapper.setup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
+                                            vDSP_vsmul(split.realp, 1, &scale, split.realp, 1, vDSP_Length(halfN))
+                                            vDSP_vsmul(split.imagp, 1, &scale, split.imagp, 1, vDSP_Length(halfN))
+
+                                            // Compute power: r² + i² using vDSP_zvmags (squared magnitude)
+                                            vDSP_zvmags(&split, 1, powerPtr.baseAddress!, 1, vDSP_Length(halfN))
+
+                                            // DC is correct, but Nyquist is packed in imagp[0]
+                                            let nyq = split.imagp[0]
+                                            powerPtr[halfN] = nyq * nyq
+
+                                            // Copy to output (frame-major)
+                                            let frameOffset = frameIdx * nFreqs
+                                            memcpy(outPtr.baseAddress! + frameOffset, powerPtr.baseAddress!, nFreqs * MemoryLayout<Float>.size)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            result.append(powerRow)
+        }
+
+        // Transpose to freq-major and build [[Float]] result
+        var transposed = [Float](repeating: 0, count: nFreqs * nFrames)
+        vDSP_mtrans(powerFrameMajor, 1, &transposed, 1, vDSP_Length(nFreqs), vDSP_Length(nFrames))
+
+        var result = [[Float]]()
+        result.reserveCapacity(nFreqs)
+
+        transposed.withUnsafeBufferPointer { ptr in
+            for f in 0..<nFreqs {
+                result.append(Array(UnsafeBufferPointer(start: ptr.baseAddress! + f * nFrames, count: nFrames)))
+            }
         }
 
         return result

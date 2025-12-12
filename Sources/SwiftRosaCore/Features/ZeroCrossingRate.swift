@@ -60,25 +60,65 @@ public struct ZeroCrossingRate: Sendable {
         }
 
         let nFrames = max(0, 1 + (paddedSignal.count - frameLength) / hopLength)
+        guard nFrames > 0 else { return [] }
+
+        // OPTIMIZED: Precompute ALL crossings once, then use cumulative sum
+        // This is O(N) + O(nFrames) instead of O(nFrames × frameLength)
+
+        let n = paddedSignal.count - 1
+        guard n > 0 else { return [Float](repeating: 0, count: nFrames) }
+
+        // Step 1: Compute sign products for entire signal (vectorized)
+        var signProduct = [Float](repeating: 0, count: n)
+        paddedSignal.withUnsafeBufferPointer { sigPtr in
+            signProduct.withUnsafeMutableBufferPointer { prodPtr in
+                vDSP_vmul(
+                    sigPtr.baseAddress!, 1,
+                    sigPtr.baseAddress! + 1, 1,
+                    prodPtr.baseAddress!, 1,
+                    vDSP_Length(n)
+                )
+            }
+        }
+
+        // Step 2: Create binary crossing indicators
+        // signProduct < 0 means crossing occurred
+        var crossings = [Float](repeating: 0, count: n)
+        for i in 0..<n {
+            crossings[i] = signProduct[i] < 0 ? 1.0 : 0.0
+        }
+
+        // Step 3: Compute cumulative sum
+        // Note: vDSP_vrsum has incorrect indexing for our use case, use manual cumsum
+        var cumsum = [Float](repeating: 0, count: n + 1)
+        cumsum[0] = 0
+        for i in 0..<n {
+            cumsum[i + 1] = cumsum[i] + crossings[i]
+        }
+
+        // Step 4: Compute per-frame ZCR using cumsum differences
         var result = [Float](repeating: 0, count: nFrames)
+        // Normalize by frameLength (not frameLength-1) to match librosa's behavior
+        // librosa uses np.mean(crossings) where crossings array includes first sample as 0
+        let invFrameLength = 1.0 / Float(frameLength)
 
-        for frameIdx in 0..<nFrames {
-            let start = frameIdx * hopLength
-            let end = min(start + frameLength, paddedSignal.count)
+        result.withUnsafeMutableBufferPointer { resultPtr in
+            cumsum.withUnsafeBufferPointer { csPtr in
+                for frameIdx in 0..<nFrames {
+                    let start = frameIdx * hopLength
+                    // The cumsum array has n+1 elements (indices 0..n)
+                    // Frame of length L covers samples start..<start+L, which has L-1 crossing opportunities
+                    // Cumsum[i] = total crossings in samples 0..i (exclusive of i)
+                    // So crossings in frame = cumsum[start + frameLength - 1] - cumsum[start]
+                    let end = min(start + frameLength - 1, n)
 
-            // Count zero crossings in this frame
-            var crossings = 0
-            for i in (start + 1)..<end {
-                let sign1 = paddedSignal[i - 1] >= 0
-                let sign2 = paddedSignal[i] >= 0
-                if sign1 != sign2 {
-                    crossings += 1
+                    if end > start {
+                        // Number of crossings in frame = cumsum[end] - cumsum[start]
+                        let frameCrossings = csPtr[end] - csPtr[start]
+                        resultPtr[frameIdx] = frameCrossings * invFrameLength
+                    }
                 }
             }
-
-            // Normalize by frame length
-            let frameLen = end - start
-            result[frameIdx] = frameLen > 1 ? Float(crossings) / Float(frameLen - 1) : 0
         }
 
         return result
@@ -91,16 +131,30 @@ public struct ZeroCrossingRate: Sendable {
     public static func compute(_ signal: [Float]) -> Float {
         guard signal.count > 1 else { return 0 }
 
-        var crossings = 0
-        for i in 1..<signal.count {
-            let sign1 = signal[i - 1] >= 0
-            let sign2 = signal[i] >= 0
-            if sign1 != sign2 {
-                crossings += 1
+        let n = signal.count - 1
+
+        // Compute x[i] * x[i-1] - negative values indicate zero crossings
+        var signProduct = [Float](repeating: 0, count: n)
+
+        signal.withUnsafeBufferPointer { signalPtr in
+            signProduct.withUnsafeMutableBufferPointer { prodPtr in
+                vDSP_vmul(
+                    signalPtr.baseAddress!, 1,      // x[i-1]
+                    signalPtr.baseAddress! + 1, 1,  // x[i]
+                    prodPtr.baseAddress!, 1,
+                    vDSP_Length(n)
+                )
             }
         }
 
-        return Float(crossings) / Float(signal.count - 1)
+        // Count zero crossings (product < 0)
+        var crossings: Int = 0
+        for i in 0..<n {
+            if signProduct[i] < 0 {
+                crossings += 1
+            }
+        }
+        return Float(crossings) / Float(n)
     }
 
     /// Compute zero-crossing rate with threshold.
@@ -138,16 +192,29 @@ public struct ZeroCrossingRate: Sendable {
     public static func count(_ signal: [Float]) -> Int {
         guard signal.count > 1 else { return 0 }
 
-        var crossings = 0
-        for i in 1..<signal.count {
-            let sign1 = signal[i - 1] >= 0
-            let sign2 = signal[i] >= 0
-            if sign1 != sign2 {
-                crossings += 1
+        let n = signal.count - 1
+
+        return signal.withUnsafeBufferPointer { signalPtr in
+            var signProduct = [Float](repeating: 0, count: n)
+
+            return signProduct.withUnsafeMutableBufferPointer { prodPtr in
+                vDSP_vmul(
+                    signalPtr.baseAddress!, 1,
+                    signalPtr.baseAddress! + 1, 1,
+                    prodPtr.baseAddress!, 1,
+                    vDSP_Length(n)
+                )
+
+                // Count zero crossings (product < 0)
+                var crossings: Int = 0
+                for i in 0..<n {
+                    if prodPtr[i] < 0 {
+                        crossings += 1
+                    }
+                }
+                return crossings
             }
         }
-
-        return crossings
     }
 
     /// Find zero-crossing positions in a signal.
@@ -178,19 +245,19 @@ public struct ZeroCrossingRate: Sendable {
         var result = [Float]()
         result.reserveCapacity(signal.count + 2 * padLength)
 
-        // Left padding (reflect)
-        for i in (1...padLength).reversed() {
-            let idx = i % signal.count
-            result.append(signal[idx])
+        // Left padding (edge) - librosa uses edge padding for ZCR
+        let leftValue = signal[0]
+        for _ in 0..<padLength {
+            result.append(leftValue)
         }
 
         // Original signal
         result.append(contentsOf: signal)
 
-        // Right padding (reflect)
-        for i in 1...padLength {
-            let idx = (signal.count - 1) - (i % signal.count)
-            result.append(signal[max(0, idx)])
+        // Right padding (edge)
+        let rightValue = signal[signal.count - 1]
+        for _ in 0..<padLength {
+            result.append(rightValue)
         }
 
         return result

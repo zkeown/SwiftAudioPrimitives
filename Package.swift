@@ -161,7 +161,8 @@ let package = Package(
                 "SwiftRosaML",
                 "SwiftRosaNN",
             ],
-            path: "Tests/SwiftRosaBenchmarks"
+            path: "Tests/SwiftRosaBenchmarks",
+            resources: [.copy("ReferenceTimings")]
         ),
     ]
 )

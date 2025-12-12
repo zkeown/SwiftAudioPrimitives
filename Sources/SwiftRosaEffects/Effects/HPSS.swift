@@ -193,40 +193,28 @@ public struct HPSS: Sendable {
         let nFreqs = magnitude.count
         let nFrames = magnitude[0].count
 
-        // Harmonic enhancement: median filter along time (horizontal)
-        let harmonicEnhanced = medianFilterHorizontal(magnitude, kernelSize: config.kernelSize.harmonic)
+        // OPTIMIZATION: Convert to contiguous storage for cache-friendly operations
+        let contiguousMag = ContiguousMatrix(from: magnitude)
 
-        // Percussive enhancement: median filter along frequency (vertical)
-        let percussiveEnhanced = medianFilterVertical(magnitude, kernelSize: config.kernelSize.percussive)
+        // Harmonic enhancement: median filter along time (horizontal) - already cache-friendly
+        let harmonicEnhanced = medianFilterHorizontalContiguous(contiguousMag, kernelSize: config.kernelSize.harmonic)
 
-        // Compute soft masks using Wiener filtering
-        var harmonicMask = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: nFreqs)
-        var percussiveMask = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: nFreqs)
+        // Percussive enhancement: median filter along frequency (vertical) - use transpose trick
+        let percussiveEnhanced = medianFilterVerticalContiguous(contiguousMag, kernelSize: config.kernelSize.percussive)
 
-        let margin = config.margin
-        let power = config.power
+        // OPTIMIZATION: Vectorized soft mask computation
+        let (harmonicMaskData, percussiveMaskData) = computeSoftMasksVectorized(
+            harmonicEnhanced: harmonicEnhanced,
+            percussiveEnhanced: percussiveEnhanced,
+            power: config.power,
+            margin: config.margin
+        )
 
-        for f in 0..<nFreqs {
-            for t in 0..<nFrames {
-                let hVal = pow(harmonicEnhanced[f][t], power)
-                let pVal = pow(percussiveEnhanced[f][t], power)
-
-                // Apply margin
-                let hMarg = hVal * margin
-                let pMarg = pVal * margin
-
-                let total = hMarg + pMarg
-                if total > 0 {
-                    harmonicMask[f][t] = hMarg / total
-                    percussiveMask[f][t] = pMarg / total
-                } else {
-                    harmonicMask[f][t] = 0.5
-                    percussiveMask[f][t] = 0.5
-                }
-            }
-        }
-
-        return HPSSMasks(harmonicMask: harmonicMask, percussiveMask: percussiveMask)
+        // Convert back to [[Float]] for API compatibility
+        return HPSSMasks(
+            harmonicMask: harmonicMaskData.to2DArray(),
+            percussiveMask: percussiveMaskData.to2DArray()
+        )
     }
 
     /// Compute separation masks from complex spectrogram.
@@ -241,79 +229,180 @@ public struct HPSS: Sendable {
     private func applyMask(_ spectrogram: ComplexMatrix, mask: [[Float]]) -> ComplexMatrix {
         let nFreqs = spectrogram.rows
         let nFrames = spectrogram.cols
+        let count = nFreqs * nFrames
 
-        var realMasked = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: nFreqs)
-        var imagMasked = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: nFreqs)
+        // OPTIMIZATION: Vectorized mask application
+        var realMasked = [Float](repeating: 0, count: count)
+        var imagMasked = [Float](repeating: 0, count: count)
 
+        // Flatten mask
+        var flatMask = [Float](repeating: 0, count: count)
         for f in 0..<nFreqs {
-            for t in 0..<nFrames {
-                let m = mask[f][t]
-                realMasked[f][t] = spectrogram.real[f][t] * m
-                imagMasked[f][t] = spectrogram.imag[f][t] * m
+            let offset = f * nFrames
+            mask[f].withUnsafeBufferPointer { ptr in
+                memcpy(&flatMask[offset], ptr.baseAddress!, nFrames * MemoryLayout<Float>.size)
             }
         }
 
-        return ComplexMatrix(real: realMasked, imag: imagMasked)
+        // Flatten spectrogram
+        var flatReal = [Float](repeating: 0, count: count)
+        var flatImag = [Float](repeating: 0, count: count)
+        for f in 0..<nFreqs {
+            let offset = f * nFrames
+            spectrogram.real[f].withUnsafeBufferPointer { ptr in
+                memcpy(&flatReal[offset], ptr.baseAddress!, nFrames * MemoryLayout<Float>.size)
+            }
+            spectrogram.imag[f].withUnsafeBufferPointer { ptr in
+                memcpy(&flatImag[offset], ptr.baseAddress!, nFrames * MemoryLayout<Float>.size)
+            }
+        }
+
+        // Vectorized multiply
+        vDSP_vmul(flatReal, 1, flatMask, 1, &realMasked, 1, vDSP_Length(count))
+        vDSP_vmul(flatImag, 1, flatMask, 1, &imagMasked, 1, vDSP_Length(count))
+
+        // Convert back to [[Float]]
+        var realResult = [[Float]]()
+        var imagResult = [[Float]]()
+        realResult.reserveCapacity(nFreqs)
+        imagResult.reserveCapacity(nFreqs)
+
+        for f in 0..<nFreqs {
+            let start = f * nFrames
+            realResult.append(Array(realMasked[start..<(start + nFrames)]))
+            imagResult.append(Array(imagMasked[start..<(start + nFrames)]))
+        }
+
+        return ComplexMatrix(real: realResult, imag: imagResult)
     }
 
-    /// Median filter along horizontal (time) axis - for harmonic enhancement.
-    private func medianFilterHorizontal(_ matrix: [[Float]], kernelSize: Int) -> [[Float]] {
-        let nFreqs = matrix.count
-        let nFrames = matrix[0].count
+    // MARK: - Optimized Median Filters
+
+    /// Optimized horizontal median filter using contiguous storage and parallel processing.
+    private func medianFilterHorizontalContiguous(_ matrix: ContiguousMatrix, kernelSize: Int) -> ContiguousMatrix {
+        let nFreqs = matrix.rows
+        let nFrames = matrix.cols
         let halfKernel = kernelSize / 2
 
-        var result = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: nFreqs)
+        var result = [Float](repeating: 0, count: nFreqs * nFrames)
 
-        for f in 0..<nFreqs {
-            for t in 0..<nFrames {
-                // Collect values in kernel window
-                var window = [Float]()
-                window.reserveCapacity(kernelSize)
+        // Process rows in parallel - each row is independent and already contiguous
+        result.withUnsafeMutableBufferPointer { resultPtr in
+            matrix.data.withUnsafeBufferPointer { dataPtr in
+                DispatchQueue.concurrentPerform(iterations: nFreqs) { f in
+                    // Thread-local window buffer
+                    var window = [Float](repeating: 0, count: kernelSize)
+                    let rowOffset = f * nFrames
 
-                for dt in -halfKernel...halfKernel {
-                    let tIdx = t + dt
-                    if tIdx >= 0 && tIdx < nFrames {
-                        window.append(matrix[f][tIdx])
+                    for t in 0..<nFrames {
+                        let tStart = max(0, t - halfKernel)
+                        let tEnd = min(nFrames, t + halfKernel + 1)
+                        let windowLen = tEnd - tStart
+
+                        // Copy window from contiguous row (cache-friendly)
+                        for i in 0..<windowLen {
+                            window[i] = dataPtr[rowOffset + tStart + i]
+                        }
+
+                        // Sort and get median
+                        vDSP_vsort(&window, vDSP_Length(windowLen), 1)  // Ascending sort
+                        resultPtr[rowOffset + t] = window[windowLen / 2]
                     }
                 }
-
-                // Compute median
-                window.sort()
-                result[f][t] = window[window.count / 2]
             }
         }
 
-        return result
+        return ContiguousMatrix(data: result, rows: nFreqs, cols: nFrames)
     }
 
-    /// Median filter along vertical (frequency) axis - for percussive enhancement.
-    private func medianFilterVertical(_ matrix: [[Float]], kernelSize: Int) -> [[Float]] {
-        let nFreqs = matrix.count
-        let nFrames = matrix[0].count
-        let halfKernel = kernelSize / 2
+    /// Optimized vertical median filter using transpose trick for cache-friendly access.
+    private func medianFilterVerticalContiguous(_ matrix: ContiguousMatrix, kernelSize: Int) -> ContiguousMatrix {
+        let nFreqs = matrix.rows
+        let nFrames = matrix.cols
 
-        var result = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: nFreqs)
+        // OPTIMIZATION: Transpose (nFreqs, nFrames) -> (nFrames, nFreqs)
+        // This makes vertical filtering become horizontal (cache-friendly)
+        var transposed = [Float](repeating: 0, count: nFreqs * nFrames)
+        matrix.data.withUnsafeBufferPointer { ptr in
+            vDSP_mtrans(ptr.baseAddress!, 1, &transposed, 1,
+                        vDSP_Length(nFrames), vDSP_Length(nFreqs))
+        }
 
-        for f in 0..<nFreqs {
-            for t in 0..<nFrames {
-                // Collect values in kernel window
-                var window = [Float]()
-                window.reserveCapacity(kernelSize)
+        let transposedMatrix = ContiguousMatrix(data: transposed, rows: nFrames, cols: nFreqs)
 
-                for df in -halfKernel...halfKernel {
-                    let fIdx = f + df
-                    if fIdx >= 0 && fIdx < nFreqs {
-                        window.append(matrix[fIdx][t])
-                    }
+        // Apply horizontal filter on transposed data (which is vertical on original)
+        let filtered = medianFilterHorizontalContiguous(transposedMatrix, kernelSize: kernelSize)
+
+        // Transpose back: (nFrames, nFreqs) -> (nFreqs, nFrames)
+        var result = [Float](repeating: 0, count: nFreqs * nFrames)
+        filtered.data.withUnsafeBufferPointer { ptr in
+            vDSP_mtrans(ptr.baseAddress!, 1, &result, 1,
+                        vDSP_Length(nFreqs), vDSP_Length(nFrames))
+        }
+
+        return ContiguousMatrix(data: result, rows: nFreqs, cols: nFrames)
+    }
+
+    // MARK: - Vectorized Mask Computation
+
+    /// Compute soft masks using vectorized Accelerate operations.
+    private func computeSoftMasksVectorized(
+        harmonicEnhanced: ContiguousMatrix,
+        percussiveEnhanced: ContiguousMatrix,
+        power: Float,
+        margin: Float
+    ) -> (harmonic: ContiguousMatrix, percussive: ContiguousMatrix) {
+        let count = harmonicEnhanced.count
+        let nFreqs = harmonicEnhanced.rows
+        let nFrames = harmonicEnhanced.cols
+
+        // Allocate output arrays
+        var hMask = [Float](repeating: 0, count: count)
+        var pMask = [Float](repeating: 0, count: count)
+
+        // Temporary arrays for vectorized operations
+        var hPower = [Float](repeating: 0, count: count)
+        var pPower = [Float](repeating: 0, count: count)
+        var total = [Float](repeating: 0, count: count)
+
+        // Compute H^power and P^power using vForce
+        var n = Int32(count)
+        harmonicEnhanced.data.withUnsafeBufferPointer { hPtr in
+            percussiveEnhanced.data.withUnsafeBufferPointer { pPtr in
+                // H^power
+                if power == 2.0 {
+                    // Optimized path for power=2 (most common case - Wiener filtering)
+                    vDSP_vsq(hPtr.baseAddress!, 1, &hPower, 1, vDSP_Length(count))
+                    vDSP_vsq(pPtr.baseAddress!, 1, &pPower, 1, vDSP_Length(count))
+                } else {
+                    // General power using vvpowsf
+                    var powerVal = power
+                    var powerArray = [Float](repeating: powerVal, count: count)
+                    vvpowf(&hPower, &powerArray, Array(hPtr), &n)
+                    vvpowf(&pPower, &powerArray, Array(pPtr), &n)
                 }
-
-                // Compute median
-                window.sort()
-                result[f][t] = window[window.count / 2]
             }
         }
 
-        return result
+        // Apply margin: hPower *= margin, pPower *= margin
+        var marginVal = margin
+        vDSP_vsmul(hPower, 1, &marginVal, &hPower, 1, vDSP_Length(count))
+        vDSP_vsmul(pPower, 1, &marginVal, &pPower, 1, vDSP_Length(count))
+
+        // total = hPower + pPower
+        vDSP_vadd(hPower, 1, pPower, 1, &total, 1, vDSP_Length(count))
+
+        // Compute masks: hMask = hPower / total, pMask = pPower / total
+        // Handle division by zero by adding small epsilon
+        var epsilon: Float = 1e-10
+        vDSP_vsadd(total, 1, &epsilon, &total, 1, vDSP_Length(count))
+        vDSP_vdiv(total, 1, hPower, 1, &hMask, 1, vDSP_Length(count))
+        vDSP_vdiv(total, 1, pPower, 1, &pMask, 1, vDSP_Length(count))
+
+        return (
+            ContiguousMatrix(data: hMask, rows: nFreqs, cols: nFrames),
+            ContiguousMatrix(data: pMask, rows: nFreqs, cols: nFrames)
+        )
     }
 }
 

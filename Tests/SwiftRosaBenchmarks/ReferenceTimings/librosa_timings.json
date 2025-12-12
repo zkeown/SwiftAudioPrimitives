@@ -1,0 +1,1454 @@
+{
+  "metadata": {
+    "generator": "benchmark_librosa.py",
+    "generated_at": "2025-12-12T13:08:03.829827",
+    "librosa_version": "0.11.0",
+    "numpy_version": "2.3.5",
+    "scipy_version": "1.16.3",
+    "sample_rate": 22050,
+    "hardware": {
+      "platform": "macOS-26.1-arm64-arm-64bit-Mach-O",
+      "processor": "arm",
+      "machine": "arm64",
+      "python_version": "3.13.9",
+      "cpu_brand": "Apple M4 Max",
+      "mac_model": "Mac16,5"
+    }
+  },
+  "benchmarks": {
+    "stft_1s_nfft1024": {
+      "operation": "stft_1s_nfft1024",
+      "parameters": {
+        "n_fft": 1024,
+        "hop_length": 256
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.2444250276312232,
+      "std_ms": 0.04000072352406325,
+      "min_ms": 0.22066698875278234,
+      "max_ms": 0.36220799665898085,
+      "samples_per_second": 90211711.18887214,
+      "real_time_factor": 4091.234067522546
+    },
+    "stft_1s_nfft2048": {
+      "operation": "stft_1s_nfft2048",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.245562510099262,
+      "std_ms": 0.0056764394908757195,
+      "min_ms": 0.2383330138400197,
+      "max_ms": 0.25512499269098043,
+      "samples_per_second": 89793836.9789708,
+      "real_time_factor": 4072.2828561891515
+    },
+    "stft_1s_nfft4096": {
+      "operation": "stft_1s_nfft4096",
+      "parameters": {
+        "n_fft": 4096,
+        "hop_length": 1024
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.3128959098830819,
+      "std_ms": 0.013491060589937136,
+      "min_ms": 0.3012500237673521,
+      "max_ms": 0.3409590572118759,
+      "samples_per_second": 70470719.82576986,
+      "real_time_factor": 3195.95101250657
+    },
+    "stft_10s_nfft1024": {
+      "operation": "stft_10s_nfft1024",
+      "parameters": {
+        "n_fft": 1024,
+        "hop_length": 256
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 1.8028460210189223,
+      "std_ms": 0.05685787505470352,
+      "min_ms": 1.7552500357851386,
+      "max_ms": 1.9404999911785126,
+      "samples_per_second": 122306618.21877559,
+      "real_time_factor": 5546.785406747192
+    },
+    "stft_10s_nfft2048": {
+      "operation": "stft_10s_nfft2048",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 1.9532583886757493,
+      "std_ms": 0.04704336477837547,
+      "min_ms": 1.904584001749754,
+      "max_ms": 2.0460409577935934,
+      "samples_per_second": 112888290.29399043,
+      "real_time_factor": 5119.650353468954
+    },
+    "stft_10s_nfft4096": {
+      "operation": "stft_10s_nfft4096",
+      "parameters": {
+        "n_fft": 4096,
+        "hop_length": 1024
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 2.069141704123467,
+      "std_ms": 0.03616698873098754,
+      "min_ms": 2.0178339909762144,
+      "max_ms": 2.153499983251095,
+      "samples_per_second": 106565925.16625561,
+      "real_time_factor": 4832.92177624742
+    },
+    "stft_60s_nfft1024": {
+      "operation": "stft_60s_nfft1024",
+      "parameters": {
+        "n_fft": 1024,
+        "hop_length": 256
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 11.220483295619488,
+      "std_ms": 0.2215658898113207,
+      "min_ms": 10.82900003530085,
+      "max_ms": 11.632374953478575,
+      "samples_per_second": 117909359.61880568,
+      "real_time_factor": 5347.363248018398
+    },
+    "stft_60s_nfft2048": {
+      "operation": "stft_60s_nfft2048",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 12.023241631686687,
+      "std_ms": 0.3189358402776711,
+      "min_ms": 11.13520807120949,
+      "max_ms": 12.317333021201193,
+      "samples_per_second": 110036880.27971555,
+      "real_time_factor": 4990.334706563064
+    },
+    "stft_60s_nfft4096": {
+      "operation": "stft_60s_nfft4096",
+      "parameters": {
+        "n_fft": 4096,
+        "hop_length": 1024
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 12.83433751668781,
+      "std_ms": 0.17002839561766975,
+      "min_ms": 12.497042072936893,
+      "max_ms": 13.169917045161128,
+      "samples_per_second": 103082843.05908062,
+      "real_time_factor": 4674.958868892545
+    },
+    "istft_1s": {
+      "operation": "istft_1s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.4899415886029601,
+      "std_ms": 0.019350648986165706,
+      "min_ms": 0.43820799328386784,
+      "max_ms": 0.5102079594507813,
+      "samples_per_second": 45005364.95151246,
+      "real_time_factor": 2041.0596349892273
+    },
+    "istft_10s": {
+      "operation": "istft_10s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 3.889074781909585,
+      "std_ms": 0.17456503807314808,
+      "min_ms": 3.5960000241175294,
+      "max_ms": 4.094291944056749,
+      "samples_per_second": 56697289.809308246,
+      "real_time_factor": 2571.3056602860884
+    },
+    "istft_60s": {
+      "operation": "istft_60s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 26.84663739055395,
+      "std_ms": 1.7788495607699746,
+      "min_ms": 24.135750019922853,
+      "max_ms": 29.69204098917544,
+      "samples_per_second": 49279914.67808555,
+      "real_time_factor": 2234.9167654460566
+    },
+    "mel_1s_nmels40": {
+      "operation": "mel_1s_nmels40",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 40
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.6531251245178282,
+      "std_ms": 0.06309925332861321,
+      "min_ms": 0.6076249992474914,
+      "max_ms": 0.8264998905360699,
+      "samples_per_second": 33760759.11377393,
+      "real_time_factor": 1531.100186565711
+    },
+    "mel_1s_nmels64": {
+      "operation": "mel_1s_nmels64",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 64
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.7586375810205936,
+      "std_ms": 0.030594504151293694,
+      "min_ms": 0.7313329260796309,
+      "max_ms": 0.8160839788615704,
+      "samples_per_second": 29065261.92696146,
+      "real_time_factor": 1318.1524683429234
+    },
+    "mel_1s_nmels128": {
+      "operation": "mel_1s_nmels128",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 1.091483177151531,
+      "std_ms": 0.09765070723251518,
+      "min_ms": 1.0192919289693236,
+      "max_ms": 1.3612089678645134,
+      "samples_per_second": 20201868.852934957,
+      "real_time_factor": 916.1845284777758
+    },
+    "mel_10s_nmels40": {
+      "operation": "mel_10s_nmels40",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 40
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 3.614187496714294,
+      "std_ms": 0.16720783026218358,
+      "min_ms": 3.4487079828977585,
+      "max_ms": 3.9971249643713236,
+      "samples_per_second": 61009563.0623645,
+      "real_time_factor": 2766.873608270499
+    },
+    "mel_10s_nmels64": {
+      "operation": "mel_10s_nmels64",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 64
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 3.499004105105996,
+      "std_ms": 0.19172282020836465,
+      "min_ms": 3.303666948340833,
+      "max_ms": 4.0181250078603625,
+      "samples_per_second": 63017931.210263714,
+      "real_time_factor": 2857.956063957538
+    },
+    "mel_10s_nmels128": {
+      "operation": "mel_10s_nmels128",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 3.9998792111873627,
+      "std_ms": 0.20438231413866859,
+      "min_ms": 3.688042052090168,
+      "max_ms": 4.329625051468611,
+      "samples_per_second": 55126664.67109258,
+      "real_time_factor": 2500.075495287645
+    },
+    "mel_60s_nmels40": {
+      "operation": "mel_60s_nmels40",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 40
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 20.276074926368892,
+      "std_ms": 0.9057202063921762,
+      "min_ms": 19.11533297970891,
+      "max_ms": 21.473083063028753,
+      "samples_per_second": 65249315.008174874,
+      "real_time_factor": 2959.152608080493
+    },
+    "mel_60s_nmels64": {
+      "operation": "mel_60s_nmels64",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 64
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 19.003091717604548,
+      "std_ms": 0.8075030075582537,
+      "min_ms": 17.638958990573883,
+      "max_ms": 20.907375030219555,
+      "samples_per_second": 69620250.202464,
+      "real_time_factor": 3157.380961562993
+    },
+    "mel_60s_nmels128": {
+      "operation": "mel_60s_nmels128",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 19.678779202513397,
+      "std_ms": 0.8442072294146226,
+      "min_ms": 18.636583001352847,
+      "max_ms": 20.90266696177423,
+      "samples_per_second": 67229780.18021692,
+      "real_time_factor": 3048.9696226855744
+    },
+    "mfcc_1s_nmfcc13": {
+      "operation": "mfcc_1s_nmfcc13",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128,
+        "n_mfcc": 13
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 1.057729113381356,
+      "std_ms": 0.049569346734790486,
+      "min_ms": 1.0016669984906912,
+      "max_ms": 1.1449160519987345,
+      "samples_per_second": 20846547.306909613,
+      "real_time_factor": 945.4216465718645
+    },
+    "mfcc_1s_nmfcc20": {
+      "operation": "mfcc_1s_nmfcc20",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128,
+        "n_mfcc": 20
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 1.0287540033459663,
+      "std_ms": 0.05143176694821107,
+      "min_ms": 0.9829590562731028,
+      "max_ms": 1.1600840371102095,
+      "samples_per_second": 21433695.449333444,
+      "real_time_factor": 972.0496802418795
+    },
+    "mfcc_1s_nmfcc40": {
+      "operation": "mfcc_1s_nmfcc40",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128,
+        "n_mfcc": 40
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 1.0738665936514735,
+      "std_ms": 0.03221674481343327,
+      "min_ms": 1.0044999653473496,
+      "max_ms": 1.1257079895585775,
+      "samples_per_second": 20533276.78722483,
+      "real_time_factor": 931.2143667675659
+    },
+    "mfcc_10s_nmfcc13": {
+      "operation": "mfcc_10s_nmfcc13",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128,
+        "n_mfcc": 13
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 4.2207125807181,
+      "std_ms": 0.0975749631375734,
+      "min_ms": 4.109582980163395,
+      "max_ms": 4.375583957880735,
+      "samples_per_second": 52242363.293660894,
+      "real_time_factor": 2369.2681765832604
+    },
+    "mfcc_10s_nmfcc20": {
+      "operation": "mfcc_10s_nmfcc20",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128,
+        "n_mfcc": 20
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 4.216995602473617,
+      "std_ms": 0.1475447614214812,
+      "min_ms": 4.043375025503337,
+      "max_ms": 4.536583088338375,
+      "samples_per_second": 52288411.178484164,
+      "real_time_factor": 2371.3565160310277
+    },
+    "mfcc_10s_nmfcc40": {
+      "operation": "mfcc_10s_nmfcc40",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128,
+        "n_mfcc": 40
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 4.082124901469797,
+      "std_ms": 0.17059149313107616,
+      "min_ms": 3.768624970689416,
+      "max_ms": 4.403957980684936,
+      "samples_per_second": 54015985.62567438,
+      "real_time_factor": 2449.7045635226477
+    },
+    "mfcc_60s_nmfcc13": {
+      "operation": "mfcc_60s_nmfcc13",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128,
+        "n_mfcc": 13
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 21.0530165117234,
+      "std_ms": 0.5332244935111903,
+      "min_ms": 19.811333040706813,
+      "max_ms": 21.76262508146465,
+      "samples_per_second": 62841350.98945492,
+      "real_time_factor": 2849.9478906782274
+    },
+    "mfcc_60s_nmfcc20": {
+      "operation": "mfcc_60s_nmfcc20",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128,
+        "n_mfcc": 20
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 20.71124578360468,
+      "std_ms": 0.449544635425046,
+      "min_ms": 19.971375004388392,
+      "max_ms": 21.48420794401318,
+      "samples_per_second": 63878340.00054723,
+      "real_time_factor": 2896.976870773117
+    },
+    "mfcc_60s_nmfcc40": {
+      "operation": "mfcc_60s_nmfcc40",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128,
+        "n_mfcc": 40
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 21.241479099262506,
+      "std_ms": 1.177149929945646,
+      "min_ms": 20.136000006459653,
+      "max_ms": 24.405041011050344,
+      "samples_per_second": 62283798.30884442,
+      "real_time_factor": 2824.662054822876
+    },
+    "cqt_1s": {
+      "operation": "cqt_1s",
+      "parameters": {
+        "hop_length": 512,
+        "n_bins": 84,
+        "bins_per_octave": 12
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 5.804641614668071,
+      "std_ms": 0.19230416713077875,
+      "min_ms": 5.603999947197735,
+      "max_ms": 6.262166076339781,
+      "samples_per_second": 3798684.1331048985,
+      "real_time_factor": 172.27592440385027
+    },
+    "cqt_10s": {
+      "operation": "cqt_10s",
+      "parameters": {
+        "hop_length": 512,
+        "n_bins": 84,
+        "bins_per_octave": 12
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 8.263987500686198,
+      "std_ms": 0.13218721844272274,
+      "min_ms": 8.09416698757559,
+      "max_ms": 8.574708015657961,
+      "samples_per_second": 26682034.548296552,
+      "real_time_factor": 1210.0695940270546
+    },
+    "cqt_60s": {
+      "operation": "cqt_60s",
+      "parameters": {
+        "hop_length": 512,
+        "n_bins": 84,
+        "bins_per_octave": 12
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 26.859733287710696,
+      "std_ms": 2.3674577168448314,
+      "min_ms": 24.6735829859972,
+      "max_ms": 33.67487504146993,
+      "samples_per_second": 49255887.45906574,
+      "real_time_factor": 2233.82709564924
+    },
+    "spectral_centroid_1s": {
+      "operation": "spectral_centroid_1s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.14400408836081624,
+      "std_ms": 0.008623400277723453,
+      "min_ms": 0.13783294707536697,
+      "max_ms": 0.16799999866634607,
+      "samples_per_second": 153120652.6911346,
+      "real_time_factor": 6944.2472875798
+    },
+    "spectral_bandwidth_1s": {
+      "operation": "spectral_bandwidth_1s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.2880333107896149,
+      "std_ms": 0.021705347714039796,
+      "min_ms": 0.2727500395849347,
+      "max_ms": 0.3411250654608011,
+      "samples_per_second": 76553645.61672433,
+      "real_time_factor": 3471.8206628899925
+    },
+    "spectral_rolloff_1s": {
+      "operation": "spectral_rolloff_1s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.185758201405406,
+      "std_ms": 0.020963392982665717,
+      "min_ms": 0.17345789819955826,
+      "max_ms": 0.23054203484207392,
+      "samples_per_second": 118702699.7094853,
+      "real_time_factor": 5383.342390452848
+    },
+    "spectral_flatness_1s": {
+      "operation": "spectral_flatness_1s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.1504708081483841,
+      "std_ms": 0.0164652648513501,
+      "min_ms": 0.1281670993193984,
+      "max_ms": 0.17625000327825546,
+      "samples_per_second": 146540051.66407952,
+      "real_time_factor": 6645.807331704286
+    },
+    "spectral_contrast_1s": {
+      "operation": "spectral_contrast_1s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.334358389955014,
+      "std_ms": 0.017936930332761575,
+      "min_ms": 0.3132499987259507,
+      "max_ms": 0.36295794416218996,
+      "samples_per_second": 65947201.15432635,
+      "real_time_factor": 2990.8027734388365
+    },
+    "spectral_centroid_10s": {
+      "operation": "spectral_centroid_10s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 1.6687958035618067,
+      "std_ms": 0.14022730570629552,
+      "min_ms": 1.4926668955013156,
+      "max_ms": 1.9527500262483954,
+      "samples_per_second": 132131204.74618535,
+      "real_time_factor": 5992.344886448315
+    },
+    "spectral_bandwidth_10s": {
+      "operation": "spectral_bandwidth_10s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 3.8818083005025983,
+      "std_ms": 0.3911264142710715,
+      "min_ms": 3.2932079629972577,
+      "max_ms": 4.562458023428917,
+      "samples_per_second": 56803423.28379552,
+      "real_time_factor": 2576.118969786645
+    },
+    "spectral_rolloff_10s": {
+      "operation": "spectral_rolloff_10s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 1.6954332939349115,
+      "std_ms": 0.136520257133777,
+      "min_ms": 1.512915943749249,
+      "max_ms": 1.991167082451284,
+      "samples_per_second": 130055249.46855567,
+      "real_time_factor": 5898.197254809781
+    },
+    "spectral_flatness_10s": {
+      "operation": "spectral_flatness_10s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 1.4385666116140783,
+      "std_ms": 0.09561096706263247,
+      "min_ms": 1.3531669974327087,
+      "max_ms": 1.619082991965115,
+      "samples_per_second": 153277573.81536752,
+      "real_time_factor": 6951.363891853402
+    },
+    "spectral_contrast_10s": {
+      "operation": "spectral_contrast_10s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 2.5438665994443,
+      "std_ms": 0.1308331072029244,
+      "min_ms": 2.3493330227211118,
+      "max_ms": 2.8148330748081207,
+      "samples_per_second": 86679073.52066636,
+      "real_time_factor": 3931.023742433849
+    },
+    "spectral_centroid_60s": {
+      "operation": "spectral_centroid_60s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 11.076329089701176,
+      "std_ms": 0.7721044965674334,
+      "min_ms": 10.079249972477555,
+      "max_ms": 12.083582929335535,
+      "samples_per_second": 119443905.04161994,
+      "real_time_factor": 5416.957144744669
+    },
+    "spectral_bandwidth_60s": {
+      "operation": "spectral_bandwidth_60s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 24.286900006700307,
+      "std_ms": 0.7395718868888351,
+      "min_ms": 23.450042004697025,
+      "max_ms": 25.694207986816764,
+      "samples_per_second": 54473810.9694942,
+      "real_time_factor": 2470.467617664136
+    },
+    "spectral_rolloff_60s": {
+      "operation": "spectral_rolloff_60s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 10.601366485934705,
+      "std_ms": 0.3865348909012647,
+      "min_ms": 10.292041930370033,
+      "max_ms": 11.626957915723324,
+      "samples_per_second": 124795232.93108316,
+      "real_time_factor": 5659.64775197656
+    },
+    "spectral_flatness_60s": {
+      "operation": "spectral_flatness_60s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 8.495162311010063,
+      "std_ms": 0.1719704934382249,
+      "min_ms": 8.270042017102242,
+      "max_ms": 8.793707937002182,
+      "samples_per_second": 155735694.21803045,
+      "real_time_factor": 7062.843275194125
+    },
+    "spectral_contrast_60s": {
+      "operation": "spectral_contrast_60s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 14.17277897708118,
+      "std_ms": 0.19331658030232718,
+      "min_ms": 13.883708976209164,
+      "max_ms": 14.514458016492426,
+      "samples_per_second": 93347959.6442889,
+      "real_time_factor": 4233.467557564122
+    },
+    "onset_strength_1s": {
+      "operation": "onset_strength_1s",
+      "parameters": {
+        "hop_length": 512
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 1.1783918016590178,
+      "std_ms": 0.03776892602138884,
+      "min_ms": 1.1315830051898956,
+      "max_ms": 1.271208981052041,
+      "samples_per_second": 18711942.809646633,
+      "real_time_factor": 848.6141863785322
+    },
+    "onset_detect_1s": {
+      "operation": "onset_detect_1s",
+      "parameters": {
+        "hop_length": 512
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 1.186650083400309,
+      "std_ms": 0.02388001549647347,
+      "min_ms": 1.1475409846752882,
+      "max_ms": 1.2367089511826634,
+      "samples_per_second": 18581720.347430818,
+      "real_time_factor": 842.7084057791755
+    },
+    "onset_strength_10s": {
+      "operation": "onset_strength_10s",
+      "parameters": {
+        "hop_length": 512
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 4.239037388470024,
+      "std_ms": 0.04553105772303871,
+      "min_ms": 4.192500025965273,
+      "max_ms": 4.363082931376994,
+      "samples_per_second": 52016526.34622882,
+      "real_time_factor": 2359.0261381509667
+    },
+    "onset_detect_10s": {
+      "operation": "onset_detect_10s",
+      "parameters": {
+        "hop_length": 512
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 4.343416704796255,
+      "std_ms": 0.12527766780764588,
+      "min_ms": 4.195542074739933,
+      "max_ms": 4.557750071398914,
+      "samples_per_second": 50766485.23189383,
+      "real_time_factor": 2302.3349311516477
+    },
+    "onset_strength_60s": {
+      "operation": "onset_strength_60s",
+      "parameters": {
+        "hop_length": 512
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 23.964349937159568,
+      "std_ms": 2.8272684405104886,
+      "min_ms": 22.028165985830128,
+      "max_ms": 31.400041072629392,
+      "samples_per_second": 55207005.55071312,
+      "real_time_factor": 2503.7190725946994
+    },
+    "onset_detect_60s": {
+      "operation": "onset_detect_60s",
+      "parameters": {
+        "hop_length": 512
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 21.258933504577726,
+      "std_ms": 0.9161214530800211,
+      "min_ms": 20.205624983645976,
+      "max_ms": 23.086333996616304,
+      "samples_per_second": 62232660.90536084,
+      "real_time_factor": 2822.3428982023056
+    },
+    "resample_1s_22050to16000": {
+      "operation": "resample_1s_22050to16000",
+      "parameters": {
+        "orig_sr": 22050,
+        "target_sr": 16000
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.11923741549253464,
+      "std_ms": 0.015227731361974054,
+      "min_ms": 0.10679103434085846,
+      "max_ms": 0.15479209832847118,
+      "samples_per_second": 184925175.616378,
+      "real_time_factor": 8386.629279654331
+    },
+    "resample_1s_22050to44100": {
+      "operation": "resample_1s_22050to44100",
+      "parameters": {
+        "orig_sr": 22050,
+        "target_sr": 44100
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.10170819004997611,
+      "std_ms": 0.016266766592646798,
+      "min_ms": 0.08108303882181644,
+      "max_ms": 0.1254160888493061,
+      "samples_per_second": 216796700.33618084,
+      "real_time_factor": 9832.049901867613
+    },
+    "resample_1s_22050to8000": {
+      "operation": "resample_1s_22050to8000",
+      "parameters": {
+        "orig_sr": 22050,
+        "target_sr": 8000
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.09532930562272668,
+      "std_ms": 0.018005600107160298,
+      "min_ms": 0.07866695523262024,
+      "max_ms": 0.134709058329463,
+      "samples_per_second": 231303478.5679089,
+      "real_time_factor": 10489.953676549158
+    },
+    "resample_10s_22050to16000": {
+      "operation": "resample_10s_22050to16000",
+      "parameters": {
+        "orig_sr": 22050,
+        "target_sr": 16000
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 0.7904793135821819,
+      "std_ms": 0.008015291897680365,
+      "min_ms": 0.7777090650051832,
+      "max_ms": 0.8035000646486878,
+      "samples_per_second": 278944681.0451869,
+      "real_time_factor": 12650.552428353147
+    },
+    "resample_10s_22050to44100": {
+      "operation": "resample_10s_22050to44100",
+      "parameters": {
+        "orig_sr": 22050,
+        "target_sr": 44100
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 0.7181831868365407,
+      "std_ms": 0.008792543554270385,
+      "min_ms": 0.7060419302433729,
+      "max_ms": 0.7368749938905239,
+      "samples_per_second": 307024731.35198313,
+      "real_time_factor": 13924.024097595606
+    },
+    "resample_10s_22050to8000": {
+      "operation": "resample_10s_22050to8000",
+      "parameters": {
+        "orig_sr": 22050,
+        "target_sr": 8000
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 0.46306680887937546,
+      "std_ms": 0.008578918642789727,
+      "min_ms": 0.4536659689620137,
+      "max_ms": 0.4841670161113143,
+      "samples_per_second": 476173190.93461126,
+      "real_time_factor": 21595.15605145629
+    },
+    "resample_60s_22050to16000": {
+      "operation": "resample_60s_22050to16000",
+      "parameters": {
+        "orig_sr": 22050,
+        "target_sr": 16000
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 4.430741700343788,
+      "std_ms": 0.08826470673811897,
+      "min_ms": 4.338458995334804,
+      "max_ms": 4.604833084158599,
+      "samples_per_second": 298595605.3130668,
+      "real_time_factor": 13541.750807848834
+    },
+    "resample_60s_22050to44100": {
+      "operation": "resample_60s_22050to44100",
+      "parameters": {
+        "orig_sr": 22050,
+        "target_sr": 44100
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 3.7144333007745445,
+      "std_ms": 0.2189298483606503,
+      "min_ms": 3.5892080049961805,
+      "max_ms": 4.34920797124505,
+      "samples_per_second": 356178155.01603544,
+      "real_time_factor": 16153.204309117255
+    },
+    "resample_60s_22050to8000": {
+      "operation": "resample_60s_22050to8000",
+      "parameters": {
+        "orig_sr": 22050,
+        "target_sr": 8000
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 2.443224925082177,
+      "std_ms": 0.019439303045630074,
+      "min_ms": 2.4134999839589,
+      "max_ms": 2.4855000665411353,
+      "samples_per_second": 541497422.6965622,
+      "real_time_factor": 24557.706244742047
+    },
+    "hpss_1s": {
+      "operation": "hpss_1s",
+      "parameters": {},
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 21.720666892360896,
+      "std_ms": 0.2955096819779846,
+      "min_ms": 21.393709001131356,
+      "max_ms": 22.427957970649004,
+      "samples_per_second": 1015162.2005563249,
+      "real_time_factor": 46.03910206604648
+    },
+    "hpss_10s": {
+      "operation": "hpss_10s",
+      "parameters": {},
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 214.57925009308383,
+      "std_ms": 6.341266702283696,
+      "min_ms": 209.09408398438245,
+      "max_ms": 227.23283304367214,
+      "samples_per_second": 1027592.3692731137,
+      "real_time_factor": 46.60282853846321
+    },
+    "hpss_60s": {
+      "operation": "hpss_60s",
+      "parameters": {},
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 1193.1012623710558,
+      "std_ms": 13.51326194059091,
+      "min_ms": 1177.6831659954041,
+      "max_ms": 1224.1245419718325,
+      "samples_per_second": 1108874.8639581488,
+      "real_time_factor": 50.289109476560036
+    },
+    "chroma_stft_1s": {
+      "operation": "chroma_stft_1s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 1.2411831761710346,
+      "std_ms": 0.03581942214411791,
+      "min_ms": 1.1860409285873175,
+      "max_ms": 1.2884160969406366,
+      "samples_per_second": 17765306.86471496,
+      "real_time_factor": 805.6828510074812
+    },
+    "chroma_cqt_1s": {
+      "operation": "chroma_cqt_1s",
+      "parameters": {
+        "hop_length": 512
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 18.763599870726466,
+      "std_ms": 0.25332147047499287,
+      "min_ms": 18.51008296944201,
+      "max_ms": 19.345207954756916,
+      "samples_per_second": 1175147.6343513764,
+      "real_time_factor": 53.294677294847006
+    },
+    "chroma_stft_10s": {
+      "operation": "chroma_stft_10s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 7.195033004973084,
+      "std_ms": 0.28771789283680116,
+      "min_ms": 6.829457939602435,
+      "max_ms": 7.666707970201969,
+      "samples_per_second": 30646141.560100444,
+      "real_time_factor": 1389.8476898004737
+    },
+    "chroma_cqt_10s": {
+      "operation": "chroma_cqt_10s",
+      "parameters": {
+        "hop_length": 512
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 35.038391465786844,
+      "std_ms": 0.7117933034894981,
+      "min_ms": 33.34079100750387,
+      "max_ms": 36.08345799148083,
+      "samples_per_second": 6293097.107933928,
+      "real_time_factor": 285.40122938475866
+    },
+    "chroma_stft_60s": {
+      "operation": "chroma_stft_60s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 43.40234998380765,
+      "std_ms": 1.0138356060406715,
+      "min_ms": 42.13495797012001,
+      "max_ms": 45.21037498489022,
+      "samples_per_second": 30482220.44413675,
+      "real_time_factor": 1382.413625584433
+    },
+    "chroma_cqt_60s": {
+      "operation": "chroma_cqt_60s",
+      "parameters": {
+        "hop_length": 512
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 121.80465400451794,
+      "std_ms": 1.7356258254829078,
+      "min_ms": 118.70412493590266,
+      "max_ms": 124.72766602877527,
+      "samples_per_second": 10861653.939355452,
+      "real_time_factor": 492.59201539026986
+    },
+    "rms_1s": {
+      "operation": "rms_1s",
+      "parameters": {
+        "frame_length": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.03462082240730524,
+      "std_ms": 0.0029888223944949588,
+      "min_ms": 0.03187498077750206,
+      "max_ms": 0.04000007174909115,
+      "samples_per_second": 636899948.2619828,
+      "real_time_factor": 28884.35139510126
+    },
+    "rms_10s": {
+      "operation": "rms_10s",
+      "parameters": {
+        "frame_length": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 0.35408339463174343,
+      "std_ms": 0.014309707976479864,
+      "min_ms": 0.33891701605170965,
+      "max_ms": 0.3863750025629997,
+      "samples_per_second": 622734653.3133137,
+      "real_time_factor": 28241.934390626473
+    },
+    "rms_60s": {
+      "operation": "rms_60s",
+      "parameters": {
+        "frame_length": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 2.0031167776323855,
+      "std_ms": 0.15084663231926804,
+      "min_ms": 1.7874169861897826,
+      "max_ms": 2.2440419998019934,
+      "samples_per_second": 660470729.801255,
+      "real_time_factor": 29953.321079421996
+    },
+    "zcr_1s": {
+      "operation": "zcr_1s",
+      "parameters": {
+        "frame_length": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.14194579562172294,
+      "std_ms": 0.005728110437892358,
+      "min_ms": 0.1324580516666174,
+      "max_ms": 0.14837493654340506,
+      "samples_per_second": 155340987.05369148,
+      "real_time_factor": 7044.9427235234225
+    },
+    "zcr_10s": {
+      "operation": "zcr_10s",
+      "parameters": {
+        "frame_length": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 1.338670903351158,
+      "std_ms": 0.07701087099760112,
+      "min_ms": 1.2199580669403076,
+      "max_ms": 1.5414590016007423,
+      "samples_per_second": 164715614.1573048,
+      "real_time_factor": 7470.095880149878
+    },
+    "zcr_60s": {
+      "operation": "zcr_60s",
+      "parameters": {
+        "frame_length": 2048,
+        "hop_length": 512
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 7.712574990000576,
+      "std_ms": 0.08244958147080164,
+      "min_ms": 7.581166923046112,
+      "max_ms": 7.800249964930117,
+      "samples_per_second": 171538040.3711188,
+      "real_time_factor": 7779.50296467659
+    },
+    "delta_1s_width3": {
+      "operation": "delta_1s_width3",
+      "parameters": {
+        "width": 3
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.06484179757535458,
+      "std_ms": 0.00935858934186523,
+      "min_ms": 0.05504197906702757,
+      "max_ms": 0.08162495214492083,
+      "samples_per_second": 340058431.82208264,
+      "real_time_factor": 15422.151103042297
+    },
+    "delta_1s_width5": {
+      "operation": "delta_1s_width5",
+      "parameters": {
+        "width": 5
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.05864169215783477,
+      "std_ms": 0.0032727377346951103,
+      "min_ms": 0.05508400499820709,
+      "max_ms": 0.06504193879663944,
+      "samples_per_second": 376012341.8787469,
+      "real_time_factor": 17052.71391740349
+    },
+    "delta_1s_width9": {
+      "operation": "delta_1s_width9",
+      "parameters": {
+        "width": 9
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.057820824440568686,
+      "std_ms": 0.0023657241276064844,
+      "min_ms": 0.055458047427237034,
+      "max_ms": 0.06216706242412329,
+      "samples_per_second": 381350494.6243747,
+      "real_time_factor": 17294.807012443296
+    },
+    "delta_10s_width3": {
+      "operation": "delta_10s_width3",
+      "parameters": {
+        "width": 3
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 0.06530428072437644,
+      "std_ms": 0.0031680224267698546,
+      "min_ms": 0.060416990891098976,
+      "max_ms": 0.06895791739225388,
+      "samples_per_second": 3376501472.095579,
+      "real_time_factor": 153129.31846238454
+    },
+    "delta_10s_width5": {
+      "operation": "delta_10s_width5",
+      "parameters": {
+        "width": 5
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 0.06825011223554611,
+      "std_ms": 0.005088035449996847,
+      "min_ms": 0.06191700231283903,
+      "max_ms": 0.08129200432449579,
+      "samples_per_second": 3230763917.852708,
+      "real_time_factor": 146519.90557155138
+    },
+    "delta_10s_width9": {
+      "operation": "delta_10s_width9",
+      "parameters": {
+        "width": 9
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 0.06843730807304382,
+      "std_ms": 0.003544723744057614,
+      "min_ms": 0.06387499161064625,
+      "max_ms": 0.07620907854288816,
+      "samples_per_second": 3221926843.8299494,
+      "real_time_factor": 146119.13123945348
+    },
+    "delta_60s_width3": {
+      "operation": "delta_60s_width3",
+      "parameters": {
+        "width": 3
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 0.09696661727502942,
+      "std_ms": 0.0057243595098119835,
+      "min_ms": 0.0890420051291585,
+      "max_ms": 0.10316702537238598,
+      "samples_per_second": 13643870820.485922,
+      "real_time_factor": 618769.6517227176
+    },
+    "delta_60s_width5": {
+      "operation": "delta_60s_width5",
+      "parameters": {
+        "width": 5
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 0.10176250943914056,
+      "std_ms": 0.005108251644370342,
+      "min_ms": 0.09433308150619268,
+      "max_ms": 0.10966707486659288,
+      "samples_per_second": 13000858639.31279,
+      "real_time_factor": 589608.1015561356
+    },
+    "delta_60s_width9": {
+      "operation": "delta_60s_width9",
+      "parameters": {
+        "width": 9
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 0.11870429152622819,
+      "std_ms": 0.004280506650445732,
+      "min_ms": 0.11008302681148052,
+      "max_ms": 0.12462504673749208,
+      "samples_per_second": 11145342624.008484,
+      "real_time_factor": 505457.71537453437
+    },
+    "tonnetz_1s": {
+      "operation": "tonnetz_1s",
+      "parameters": {},
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 20.526687416713685,
+      "std_ms": 2.4531662330083854,
+      "min_ms": 18.986458075232804,
+      "max_ms": 26.090166065841913,
+      "samples_per_second": 1074211.3207241597,
+      "real_time_factor": 48.71706669950838
+    },
+    "tonnetz_10s": {
+      "operation": "tonnetz_10s",
+      "parameters": {},
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 36.38170809717849,
+      "std_ms": 2.673653738258339,
+      "min_ms": 34.0000829892233,
+      "max_ms": 42.86816599778831,
+      "samples_per_second": 6060737.978849884,
+      "real_time_factor": 274.8634004013553
+    },
+    "tonnetz_60s": {
+      "operation": "tonnetz_60s",
+      "parameters": {},
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 121.90012917853892,
+      "std_ms": 1.9784333724837126,
+      "min_ms": 119.10908296704292,
+      "max_ms": 125.66241598688066,
+      "samples_per_second": 10853146.825318707,
+      "real_time_factor": 492.2062052298734
+    },
+    "tempogram_1s": {
+      "operation": "tempogram_1s",
+      "parameters": {
+        "hop_length": 512
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.19140830263495445,
+      "std_ms": 0.007955902562947065,
+      "min_ms": 0.1771249808371067,
+      "max_ms": 0.20766595844179392,
+      "samples_per_second": 115198764.61186114,
+      "real_time_factor": 5224.433769245404
+    },
+    "tempogram_10s": {
+      "operation": "tempogram_10s",
+      "parameters": {
+        "hop_length": 512
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 1.8304082099348307,
+      "std_ms": 0.03501178017593581,
+      "min_ms": 1.7697080038487911,
+      "max_ms": 1.8861249554902315,
+      "samples_per_second": 120464931.70386873,
+      "real_time_factor": 5463.262208792233
+    },
+    "tempogram_60s": {
+      "operation": "tempogram_60s",
+      "parameters": {
+        "hop_length": 512
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 12.473237584345043,
+      "std_ms": 0.42503900370907693,
+      "min_ms": 11.955291964113712,
+      "max_ms": 13.315209071151912,
+      "samples_per_second": 106067088.92168267,
+      "real_time_factor": 4810.298817309872
+    },
+    "pcen_1s": {
+      "operation": "pcen_1s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128
+      },
+      "signal_length_seconds": 1.0,
+      "iterations": 10,
+      "mean_ms": 0.11661681346595287,
+      "std_ms": 0.02400471442364611,
+      "min_ms": 0.09533390402793884,
+      "max_ms": 0.16691710334271193,
+      "samples_per_second": 189080796.7106532,
+      "real_time_factor": 8575.092821344815
+    },
+    "pcen_10s": {
+      "operation": "pcen_10s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128
+      },
+      "signal_length_seconds": 10.0,
+      "iterations": 10,
+      "mean_ms": 0.7810000097379088,
+      "std_ms": 0.024489552312470096,
+      "min_ms": 0.7567079737782478,
+      "max_ms": 0.8458329830318689,
+      "samples_per_second": 282330342.1903878,
+      "real_time_factor": 12804.097151491509
+    },
+    "pcen_60s": {
+      "operation": "pcen_60s",
+      "parameters": {
+        "n_fft": 2048,
+        "hop_length": 512,
+        "n_mels": 128
+      },
+      "signal_length_seconds": 60.0,
+      "iterations": 10,
+      "mean_ms": 4.792445804923773,
+      "std_ms": 0.10342749715689918,
+      "min_ms": 4.673417075537145,
+      "max_ms": 5.074916058219969,
+      "samples_per_second": 276059459.7941506,
+      "real_time_factor": 12519.70339202497
+    }
+  }
+}

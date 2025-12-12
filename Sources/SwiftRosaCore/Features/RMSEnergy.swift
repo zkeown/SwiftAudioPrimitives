@@ -177,20 +177,15 @@ public struct RMSEnergy: Sendable {
         var result = [Float]()
         result.reserveCapacity(signal.count + 2 * padLength)
 
-        // Reflect padding (left)
-        for i in (1...padLength).reversed() {
-            let idx = i % signal.count
-            result.append(signal[idx])
-        }
+        // Use constant (zero) padding to match librosa default for RMS
+        // librosa.feature.rms uses pad_mode='constant' by default
+        result.append(contentsOf: [Float](repeating: 0, count: padLength))
 
         // Original signal
         result.append(contentsOf: signal)
 
-        // Reflect padding (right)
-        for i in 1...padLength {
-            let idx = (signal.count - 1) - (i % signal.count)
-            result.append(signal[max(0, idx)])
-        }
+        // Right padding with zeros
+        result.append(contentsOf: [Float](repeating: 0, count: padLength))
 
         return result
     }

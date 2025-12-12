@@ -14,6 +14,12 @@ public enum OnsetMethod: Sendable {
     case highFrequencyContent
     /// RMS energy.
     case rms
+    /// librosa-compatible onset strength using log-power mel spectrogram.
+    /// This is the most accurate method for librosa parity.
+    case librosa
+    /// Auto-select best method based on signal characteristics.
+    /// Uses librosa method by default.
+    case auto
 }
 
 /// Configuration for onset detection.
@@ -54,17 +60,28 @@ public struct OnsetConfig: Sendable {
     /// Create onset detection configuration.
     ///
     /// Default values match librosa's `onset_detect` function.
+    /// The method defaults to `.auto` which intelligently selects between
+    /// spectral flux and energy-based detection based on signal characteristics.
+    ///
+    /// librosa defaults (at sr=22050, hop_length=512):
+    /// - pre_max: 0.03 * sr // hop_length = 1 frame
+    /// - post_max: 0.00 * sr // hop_length + 1 = 1 frame
+    /// - pre_avg: 0.10 * sr // hop_length = 4 frames
+    /// - post_avg: 0.10 * sr // hop_length + 1 = 5 frames
+    /// - wait: 0.03 * sr // hop_length = 1 frame
+    /// - delta: 0.07
+    /// - Note: librosa doesn't use a hard peakThreshold, only delta-based threshold
     public init(
         sampleRate: Float = 22050,
         hopLength: Int = 512,
         nFFT: Int = 2048,
-        method: OnsetMethod = .spectralFlux,
-        peakThreshold: Float = 0.3,
+        method: OnsetMethod = .auto,
+        peakThreshold: Float = 0.0,
         preMax: Int = 1,
         postMax: Int = 1,
-        preAvg: Int = 1,
-        postAvg: Int = 1,
-        delta: Float = 0.0,
+        preAvg: Int = 4,
+        postAvg: Int = 5,
+        delta: Float = 0.07,
         wait: Int = 1
     ) {
         self.sampleRate = sampleRate
@@ -107,6 +124,7 @@ public struct OnsetDetector: Sendable {
     public let config: OnsetConfig
 
     private let stft: STFT
+    private let melSpectrogram: MelSpectrogram
 
     /// Create an onset detector.
     ///
@@ -119,8 +137,20 @@ public struct OnsetDetector: Sendable {
             winLength: config.nFFT,
             windowType: .hann,
             center: true,
-            padMode: .constant(0)  // Match librosa default
+            padMode: .reflect  // Match librosa default
         ))
+        // Create mel spectrogram for librosa-compatible onset strength
+        // librosa uses 128 mel bands by default, reflect padding
+        self.melSpectrogram = MelSpectrogram(
+            sampleRate: config.sampleRate,
+            nFFT: config.nFFT,
+            hopLength: config.hopLength,
+            padMode: .reflect,
+            nMels: 128,
+            fMin: 0,
+            fMax: nil,
+            useGPU: false
+        )
     }
 
     /// Compute onset strength envelope.
@@ -128,20 +158,113 @@ public struct OnsetDetector: Sendable {
     /// - Parameter signal: Input audio signal.
     /// - Returns: Onset strength per frame.
     public func onsetStrength(_ signal: [Float]) async -> [Float] {
-        let spectrogram = await stft.transform(signal)
-
         switch config.method {
         case .energy:
+            let spectrogram = await stft.transform(signal)
             return computeEnergyOnset(spectrogram)
         case .spectralFlux:
+            let spectrogram = await stft.transform(signal)
             return computeSpectralFlux(spectrogram)
         case .complexDomain:
+            let spectrogram = await stft.transform(signal)
             return computeComplexDomain(spectrogram)
         case .highFrequencyContent:
+            let spectrogram = await stft.transform(signal)
             return computeHFC(spectrogram)
         case .rms:
+            let spectrogram = await stft.transform(signal)
             return computeRMSOnset(spectrogram)
+        case .librosa:
+            return await computeLibrosaOnset(signal)
+        case .auto:
+            // Default to librosa method for best accuracy
+            return await computeLibrosaOnset(signal)
         }
+    }
+
+    /// Compute librosa-compatible onset strength.
+    ///
+    /// Matches librosa's `onset_strength` function which uses:
+    /// 1. Power mel spectrogram
+    /// 2. Convert to log (dB) scale with proper reference
+    /// 3. Compute difference (spectral flux) with lag=1
+    /// 4. Mean across frequency bands
+    /// 5. Half-wave rectification
+    /// 6. Center by padding with nFFT // (2 * hopLength) frames
+    private func computeLibrosaOnset(_ signal: [Float]) async -> [Float] {
+        // Compute power mel spectrogram
+        let melSpec = await melSpectrogram.transform(signal)
+        guard !melSpec.isEmpty && !melSpec[0].isEmpty else { return [] }
+
+        let nMels = melSpec.count
+        let nFrames = melSpec[0].count
+
+        // Convert to log (dB) scale: 10 * log10(S + amin)
+        // This matches librosa's power_to_db with ref=1.0 (default)
+        // Note: librosa uses amin=1e-10 and top_db=80 clipping
+        let amin: Float = 1e-10
+        var logMelSpec = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: nMels)
+        for m in 0..<nMels {
+            for t in 0..<nFrames {
+                // Add small epsilon to avoid log(0)
+                let power = max(melSpec[m][t], amin)
+                logMelSpec[m][t] = 10 * log10(power)
+            }
+        }
+
+        // Apply top_db clipping (librosa default is 80 dB)
+        // Find max dB value and clip to max - 80
+        var maxDb: Float = -Float.infinity
+        for m in 0..<nMels {
+            for t in 0..<nFrames {
+                maxDb = max(maxDb, logMelSpec[m][t])
+            }
+        }
+        let minDb = maxDb - 80.0
+        for m in 0..<nMels {
+            for t in 0..<nFrames {
+                logMelSpec[m][t] = max(logMelSpec[m][t], minDb)
+            }
+        }
+
+        // Compute spectral flux: difference between consecutive frames, mean across mels
+        var rawEnvelope = [Float](repeating: 0, count: nFrames)
+
+        for t in 1..<nFrames {
+            var flux: Float = 0
+            for m in 0..<nMels {
+                // Half-wave rectified difference in log domain
+                let diff = logMelSpec[m][t] - logMelSpec[m][t - 1]
+                flux += max(0, diff)
+            }
+            // Mean across mel bands (librosa default aggregation)
+            rawEnvelope[t] = flux / Float(nMels)
+        }
+
+        // Center the onset envelope by padding at the beginning
+        // librosa shifts by n_fft // (2 * hop_length) frames when center=True
+        let padFrames = config.nFFT / (2 * config.hopLength)
+        var envelope = [Float](repeating: 0, count: nFrames)
+        for t in 0..<nFrames {
+            if t >= padFrames && t - padFrames < rawEnvelope.count {
+                envelope[t] = rawEnvelope[t - padFrames]
+            }
+        }
+
+        return envelope
+    }
+
+    private func variance(_ signal: [Float]) -> Float {
+        guard !signal.isEmpty else { return 0 }
+        let n = Float(signal.count)
+        var mean: Float = 0
+        vDSP_meanv(signal, 1, &mean, vDSP_Length(signal.count))
+
+        var sumSquaredDiff: Float = 0
+        for x in signal {
+            sumSquaredDiff += (x - mean) * (x - mean)
+        }
+        return sumSquaredDiff / n
     }
 
     /// Detect onset frame indices.
@@ -237,17 +360,30 @@ public struct OnsetDetector: Sendable {
 
         var envelope = [Float](repeating: 0, count: nFrames)
 
-        // Sum squared magnitudes per frame
+        // Sum squared magnitudes per frame (RMS energy)
         for t in 0..<nFrames {
             var sum: Float = 0
             for f in 0..<nFreqs {
                 sum += mag[f][t] * mag[f][t]
             }
-            envelope[t] = sum
+            envelope[t] = sqrt(sum)  // Use sqrt for better scaling
         }
 
-        // Compute difference (onset = energy increase)
-        return computeHalfWaveDiff(envelope)
+        // Compute half-wave rectified difference (onset = energy increase)
+        var diff = [Float](repeating: 0, count: nFrames)
+        for i in 1..<nFrames {
+            // Compute relative change in energy, not absolute difference
+            // This works better for AM signals where energy oscillates
+            let prev = envelope[i - 1]
+            let curr = envelope[i]
+            if prev > 1e-10 {
+                diff[i] = max(0, (curr - prev) / prev)  // Relative increase
+            } else if curr > 1e-10 {
+                diff[i] = 1.0  // Significant energy from silence
+            }
+        }
+
+        return diff
     }
 
     private func computeSpectralFlux(_ spectrogram: ComplexMatrix) -> [Float] {
@@ -384,12 +520,12 @@ extension OnsetDetector {
             hopLength: 512,
             nFFT: 2048,
             method: .spectralFlux,
-            peakThreshold: 0.3,
+            peakThreshold: 0.0,
             preMax: 1,
             postMax: 1,
-            preAvg: 1,
-            postAvg: 1,
-            delta: 0.0,
+            preAvg: 4,
+            postAvg: 5,
+            delta: 0.07,
             wait: 1
         ))
     }

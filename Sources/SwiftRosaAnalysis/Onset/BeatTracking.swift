@@ -102,20 +102,21 @@ public struct BeatTracker: Sendable {
     /// Estimate tempo in BPM.
     ///
     /// - Parameter signal: Input audio signal.
-    /// - Returns: Estimated tempo in beats per minute.
+    /// - Returns: Estimated tempo in beats per minute, or 0 if no clear rhythm detected.
     public func estimateTempo(_ signal: [Float]) async -> Float {
         // Compute onset strength
         let onsetEnvelope = await onsetDetector.onsetStrength(signal)
-        guard !onsetEnvelope.isEmpty else { return config.startBPM }
+        guard !onsetEnvelope.isEmpty else { return 0 }
 
         // Compute autocorrelation
         let autocorr = computeAutocorrelation(onsetEnvelope)
+        guard !autocorr.isEmpty else { return 0 }
 
         // Find peaks in tempo range
         let minLag = Int(config.bpmToFrames(config.bpmRange.max))
         let maxLag = Int(config.bpmToFrames(config.bpmRange.min))
 
-        var bestLag = Int(config.bpmToFrames(config.startBPM))
+        var bestLag = 0
         var bestValue: Float = 0
 
         for lag in minLag..<min(maxLag, autocorr.count) {
@@ -123,6 +124,29 @@ public struct BeatTracker: Sendable {
                 bestValue = autocorr[lag]
                 bestLag = lag
             }
+        }
+
+        // Reject weak tempo estimates
+        // librosa uses similar logic - check if autocorrelation peak is strong enough
+        let minTempoStrength: Float = 0.1  // 10% of max autocorr (which is normalized to 1.0)
+        if bestValue < minTempoStrength || bestLag == 0 {
+            return 0  // No confident tempo detected
+        }
+
+        // Also check peak prominence - the tempo lag should have a clear peak
+        // compared to the overall autocorrelation energy in the tempo range
+        var sumInRange: Float = 0
+        var countInRange = 0
+        for lag in minLag..<min(maxLag, autocorr.count) {
+            sumInRange += autocorr[lag]
+            countInRange += 1
+        }
+        let avgInRange = countInRange > 0 ? sumInRange / Float(countInRange) : 0
+        let peakRatio = avgInRange > 0 ? bestValue / avgInRange : 0
+
+        // Peak should be significantly above average in tempo range
+        if peakRatio < 1.5 {  // Peak not prominent enough relative to noise floor
+            return 0
         }
 
         // Convert lag to BPM

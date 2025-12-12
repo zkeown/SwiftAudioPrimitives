@@ -82,7 +82,7 @@ public struct MFCC: Sendable {
             winLength: nFFT,
             windowType: windowType,
             center: center,
-            padMode: .reflect,
+            padMode: .constant(0),  // librosa default: zeros
             nMels: nMels,
             fMin: fMin,
             fMax: fMax,
@@ -149,10 +149,16 @@ public struct MFCC: Sendable {
 
     // MARK: - Private Implementation
 
-    /// Apply log compression with floor value.
-    /// Uses vectorized vvlogf for 4-8x speedup over scalar loop.
+    /// Apply log compression using power_to_db (10 * log10) to match librosa.
+    ///
+    /// librosa uses `power_to_db` which computes `10 * log10(S/ref)` with:
+    /// - ref=1.0 (default) for absolute dB
+    /// - amin=1e-10 as minimum amplitude floor
+    /// - top_db=80.0 for dynamic range limiting
     private func applyLogCompression(_ melSpec: [[Float]]) -> [[Float]] {
         let amin: Float = 1e-10
+        let topDb: Float = 80.0  // librosa default
+        let ref: Float = 1.0     // librosa default ref value
         let rows = melSpec.count
         guard rows > 0 else { return [] }
         let cols = melSpec[0].count
@@ -160,8 +166,17 @@ public struct MFCC: Sendable {
         var result = [[Float]]()
         result.reserveCapacity(rows)
 
+        // Precompute log10 scale factor: log10(x) = ln(x) / ln(10)
+        let log10Scale: Float = 1.0 / log(10.0)
+        let logRef: Float = 10.0 * log10(ref)
+
+        // First pass: compute all dB values and find max for top_db thresholding
+        var maxDb: Float = -Float.greatestFiniteMagnitude
+
         for row in melSpec {
-            // Clamp to minimum value using vDSP_vclip
+            var dbRow = [Float](repeating: 0, count: cols)
+
+            // Clamp to minimum value
             var clampedRow = [Float](repeating: 0, count: cols)
             var aminVar = amin
             var maxVal: Float = .greatestFiniteMagnitude
@@ -172,7 +187,29 @@ public struct MFCC: Sendable {
             var n = Int32(cols)
             vvlogf(&logRow, clampedRow, &n)
 
-            result.append(logRow)
+            // Convert to dB: 10 * log10(S/ref) = 10 * log10(S) - 10 * log10(ref)
+            var scale: Float = 10.0 * log10Scale
+            vDSP_vsmul(logRow, 1, &scale, &dbRow, 1, vDSP_Length(cols))
+
+            // Subtract log(ref) (for ref=1.0 this is 0, but keep for correctness)
+            if logRef != 0 {
+                var negLogRef = -logRef
+                vDSP_vsadd(dbRow, 1, &negLogRef, &dbRow, 1, vDSP_Length(cols))
+            }
+
+            // Track max for top_db thresholding
+            var rowMax: Float = 0
+            vDSP_maxv(dbRow, 1, &rowMax, vDSP_Length(cols))
+            maxDb = max(maxDb, rowMax)
+
+            result.append(dbRow)
+        }
+
+        // Second pass: apply top_db threshold relative to max
+        let threshold = maxDb - topDb
+        for i in 0..<rows {
+            var thresholdVar = threshold
+            vDSP_vthr(result[i], 1, &thresholdVar, &result[i], 1, vDSP_Length(cols))
         }
 
         return result
@@ -223,26 +260,24 @@ public struct MFCC: Sendable {
         return mfcc
     }
 
-    /// Compute DCT-II matrix for mel to cepstral conversion.
+    /// Compute DCT-II matrix for mel to cepstral conversion matching scipy.fft.dct(type=2, norm='ortho').
     private func computeDCTMatrix(nMels: Int, nMFCC: Int) -> [[Float]] {
         var matrix = [[Float]]()
         matrix.reserveCapacity(nMFCC)
-
-        let scale = sqrt(2.0 / Float(nMels))
+        let twoN = 2.0 * Float(nMels)
 
         for k in 0..<nMFCC {
             var row = [Float](repeating: 0, count: nMels)
 
-            for m in 0..<nMels {
-                // DCT-II formula: cos(pi * k * (m + 0.5) / N)
-                let angle = Float.pi * Float(k) * (Float(m) + 0.5) / Float(nMels)
-                row[m] = scale * cos(angle)
-            }
+            // scipy norm='ortho' scaling factors
+            let scale: Float = (k == 0)
+                ? sqrt(1.0 / (4.0 * Float(nMels)))
+                : sqrt(1.0 / (2.0 * Float(nMels)))
 
-            // First coefficient gets different scaling
-            if k == 0 {
-                var firstScale = Float(1.0 / sqrt(2.0))
-                vDSP_vsmul(row, 1, &firstScale, &row, 1, vDSP_Length(nMels))
+            for m in 0..<nMels {
+                // DCT-II: 2 * cos(pi * k * (2m + 1) / (2N))
+                let angle = Float.pi * Float(k) * (2.0 * Float(m) + 1.0) / twoN
+                row[m] = 2.0 * scale * cos(angle)
             }
 
             matrix.append(row)
@@ -282,26 +317,27 @@ public struct MFCC: Sendable {
         return weights
     }
 
-    /// Compute flat DCT-II matrix for vDSP_mmul.
+    /// Compute flat DCT-II matrix for vDSP_mmul matching scipy.fft.dct(type=2, norm='ortho').
+    ///
+    /// scipy norm='ortho' formula:
+    ///   y[k] = 2 * sum_{m=0}^{N-1} x[m] * cos(pi * k * (2m+1) / (2N)) * scale
+    ///   where scale = sqrt(1/(4N)) for k=0, sqrt(1/(2N)) for k>0
     ///
     /// Returns matrix in row-major format (nMFCC x nMels) as flat array.
     private static func computeFlatDCTMatrix(nMels: Int, nMFCC: Int) -> [Float] {
         var matrix = [Float](repeating: 0, count: nMFCC * nMels)
-
-        let scale = sqrt(2.0 / Float(nMels))
+        let twoN = 2.0 * Float(nMels)
 
         for k in 0..<nMFCC {
+            // scipy norm='ortho' scaling factors
+            let scale: Float = (k == 0)
+                ? sqrt(1.0 / (4.0 * Float(nMels)))
+                : sqrt(1.0 / (2.0 * Float(nMels)))
+
             for m in 0..<nMels {
-                // DCT-II formula: cos(pi * k * (m + 0.5) / N)
-                let angle = Float.pi * Float(k) * (Float(m) + 0.5) / Float(nMels)
-                var value = scale * cos(angle)
-
-                // First coefficient gets different scaling
-                if k == 0 {
-                    value *= Float(1.0 / sqrt(2.0))
-                }
-
-                matrix[k * nMels + m] = value
+                // DCT-II: 2 * cos(pi * k * (2m + 1) / (2N))
+                let angle = Float.pi * Float(k) * (2.0 * Float(m) + 1.0) / twoN
+                matrix[k * nMels + m] = 2.0 * scale * cos(angle)
             }
         }
 

@@ -117,6 +117,12 @@ public struct Chromagram: Sendable {
     /// Chroma filterbank for STFT-based extraction.
     private let chromaFilterbank: [[Float]]?
 
+    /// Pre-flattened filterbank for vDSP_mmul (nChroma × nFreqs row-major).
+    private let flatFilterbank: [Float]?
+
+    /// Number of frequency bins for STFT-based chromagram.
+    private let nFreqs: Int
+
     /// Create a chromagram extractor.
     ///
     /// - Parameter config: Configuration.
@@ -137,9 +143,13 @@ public struct Chromagram: Sendable {
             ))
             self.stft = nil
             self.chromaFilterbank = nil
+            self.flatFilterbank = nil
+            self.nFreqs = 0
         } else {
             // STFT-based chromagram
             self.cqt = nil
+            let nFreqBins = config.nFFT / 2 + 1
+            self.nFreqs = nFreqBins
             self.stft = STFT(config: STFTConfig(
                 nFFT: config.nFFT,
                 hopLength: config.hopLength,
@@ -148,12 +158,22 @@ public struct Chromagram: Sendable {
                 center: true,
                 padMode: .reflect
             ))
-            self.chromaFilterbank = Self.computeChromaFilterbank(
+            let filterbank = Self.computeChromaFilterbank(
                 sampleRate: config.sampleRate,
                 nFFT: config.nFFT,
                 nChroma: config.nChroma,
                 tuning: config.tuning
             )
+            self.chromaFilterbank = filterbank
+
+            // Pre-flatten filterbank for vDSP_mmul: (nChroma × nFreqs) row-major
+            var flat = [Float](repeating: 0, count: config.nChroma * nFreqBins)
+            for c in 0..<config.nChroma {
+                for f in 0..<min(nFreqBins, filterbank[c].count) {
+                    flat[c * nFreqBins + f] = filterbank[c][f]
+                }
+            }
+            self.flatFilterbank = flat
         }
     }
 
@@ -206,23 +226,51 @@ public struct Chromagram: Sendable {
     /// - Returns: Chromagram of shape (nChroma, nFrames).
     public func fromSTFT(_ stftMagnitude: [[Float]]) -> [[Float]] {
         guard !stftMagnitude.isEmpty && !stftMagnitude[0].isEmpty else { return [] }
-        guard let filterbank = chromaFilterbank else { return [] }
+        guard let flatFB = flatFilterbank else { return [] }
 
-        let nFreqs = stftMagnitude.count
+        let inputNFreqs = stftMagnitude.count
         let nFrames = stftMagnitude[0].count
+        let nChroma = config.nChroma
 
-        // Initialize chroma
-        var chroma = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: config.nChroma)
+        // OPTIMIZATION: Use vDSP_mmul for matrix multiplication instead of triple loop
+        // chroma (nChroma × nFrames) = filterbank (nChroma × nFreqs) × magnitude (nFreqs × nFrames)
 
-        // Apply filterbank: chroma = filterbank @ magnitude
-        for chromaIdx in 0..<config.nChroma {
-            for frame in 0..<nFrames {
-                var sum: Float = 0
-                for freq in 0..<min(nFreqs, filterbank[chromaIdx].count) {
-                    sum += filterbank[chromaIdx][freq] * stftMagnitude[freq][frame]
-                }
-                chroma[chromaIdx][frame] = sum
+        // Flatten magnitude to (nFreqs × nFrames) row-major
+        var flatMag = [Float](repeating: 0, count: inputNFreqs * nFrames)
+        for f in 0..<inputNFreqs {
+            let row = stftMagnitude[f]
+            let destOffset = f * nFrames
+            row.withUnsafeBufferPointer { rowPtr in
+                memcpy(&flatMag[destOffset], rowPtr.baseAddress!, min(nFrames, row.count) * MemoryLayout<Float>.size)
             }
+        }
+
+        // Output: (nChroma × nFrames) row-major
+        var flatResult = [Float](repeating: 0, count: nChroma * nFrames)
+
+        // Matrix multiply: chroma = filterbank × magnitude
+        // filterbank: (nChroma × nFreqs), magnitude: (nFreqs × nFrames) -> result: (nChroma × nFrames)
+        flatFB.withUnsafeBufferPointer { fbPtr in
+            flatMag.withUnsafeBufferPointer { magPtr in
+                flatResult.withUnsafeMutableBufferPointer { resultPtr in
+                    vDSP_mmul(
+                        fbPtr.baseAddress!, 1,      // A: filterbank (nChroma × nFreqs)
+                        magPtr.baseAddress!, 1,     // B: magnitude (nFreqs × nFrames)
+                        resultPtr.baseAddress!, 1,  // C: result (nChroma × nFrames)
+                        vDSP_Length(nChroma),       // M: rows of A and C
+                        vDSP_Length(nFrames),       // N: cols of B and C
+                        vDSP_Length(nFreqs)         // K: cols of A, rows of B
+                    )
+                }
+            }
+        }
+
+        // Reshape to [[Float]]
+        var chroma = [[Float]]()
+        chroma.reserveCapacity(nChroma)
+        for c in 0..<nChroma {
+            let start = c * nFrames
+            chroma.append(Array(flatResult[start..<(start + nFrames)]))
         }
 
         // Normalize
