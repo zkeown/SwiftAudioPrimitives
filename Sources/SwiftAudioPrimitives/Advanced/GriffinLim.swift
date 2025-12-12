@@ -1,6 +1,80 @@
 import Accelerate
 import Foundation
 
+/// Reusable workspace for Griffin-Lim iterations to minimize allocations.
+///
+/// This class holds pre-allocated buffers that are reused across iterations,
+/// significantly reducing memory pressure during phase reconstruction.
+final class GriffinLimWorkspace: @unchecked Sendable {
+    /// Flat buffers for current complex spectrogram (real/imag).
+    var currentReal: [Float]
+    var currentImag: [Float]
+
+    /// Flat buffers for previous iteration (for momentum).
+    var prevReal: [Float]
+    var prevImag: [Float]
+
+    /// Flat buffer for phase.
+    var phase: [Float]
+
+    /// Flat buffer for best phase seen.
+    var bestPhase: [Float]
+
+    /// Flat buffers for momentum computation.
+    var anglesReal: [Float]
+    var anglesImag: [Float]
+
+    /// Dimensions.
+    let rows: Int
+    let cols: Int
+
+    /// Total element count.
+    var count: Int { rows * cols }
+
+    /// Create workspace for given dimensions.
+    init(rows: Int, cols: Int) {
+        self.rows = rows
+        self.cols = cols
+        let count = rows * cols
+
+        self.currentReal = [Float](repeating: 0, count: count)
+        self.currentImag = [Float](repeating: 0, count: count)
+        self.prevReal = [Float](repeating: 0, count: count)
+        self.prevImag = [Float](repeating: 0, count: count)
+        self.phase = [Float](repeating: 0, count: count)
+        self.bestPhase = [Float](repeating: 0, count: count)
+        self.anglesReal = [Float](repeating: 0, count: count)
+        self.anglesImag = [Float](repeating: 0, count: count)
+    }
+
+    /// Initialize phase with random values in [-π, π].
+    func initializeRandomPhase() {
+        for i in 0..<count {
+            phase[i] = Float.random(in: -Float.pi...Float.pi)
+        }
+    }
+
+    /// Initialize phase with zeros.
+    func initializeZeroPhase() {
+        _ = phase.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
+    }
+
+    /// Copy current phase to best phase.
+    func saveBestPhase() {
+        _ = bestPhase.withUnsafeMutableBufferPointer { destPtr in
+            phase.withUnsafeBufferPointer { srcPtr in
+                memcpy(destPtr.baseAddress!, srcPtr.baseAddress!, count * MemoryLayout<Float>.size)
+            }
+        }
+    }
+
+    /// Swap current and previous buffers (O(1) pointer swap).
+    func swapCurrentAndPrev() {
+        swap(&currentReal, &prevReal)
+        swap(&currentImag, &prevImag)
+    }
+}
+
 /// Phase reconstruction from magnitude spectrogram using Griffin-Lim algorithm.
 ///
 /// The Griffin-Lim algorithm iteratively estimates the phase of a signal
@@ -103,62 +177,91 @@ public struct GriffinLim: Sendable {
         // Estimate output length if not provided
         let outputLength = length ?? estimateOutputLength(nFrames: nFrames)
 
-        // Initialize phase
-        var phase = initializePhase(rows: nFreqs, cols: nFrames)
+        // Flatten magnitude for efficient vectorized operations
+        let flatMagnitude = flattenMatrix(magnitude)
 
-        // Track previous reconstructed spectrogram for Fast Griffin-Lim momentum
-        var previousReconstructed: ComplexMatrix? = nil
+        // Create workspace with all preallocated buffers
+        let workspace = GriffinLimWorkspace(rows: nFreqs, cols: nFrames)
+
+        // Initialize phase
+        if randomPhaseInit {
+            workspace.initializeRandomPhase()
+        } else {
+            workspace.initializeZeroPhase()
+        }
 
         // Pre-compute momentum scale factor (librosa formula: momentum / (1 + momentum))
         let momScale = momentum / (1.0 + momentum)
 
-        // Track best phase seen across all iterations
-        // This ensures more iterations can never produce worse results
-        var bestPhase = phase
+        // Track best error
         var bestError: Float = Float.infinity
+        var hasPrevious = false
 
         // Main iteration loop
         for iter in 0..<nIter {
-            // 1. Construct complex spectrogram from magnitude and current phase
-            let complex = ComplexMatrix.fromPolar(magnitude: magnitude, phase: phase)
-
-            // 2. Inverse STFT to get audio estimate
-            let audio = await istft.transform(complex, length: outputLength)
-
-            // 3. Forward STFT of audio estimate (this is G(c_n) = "rebuilt")
-            let reconstructed = await stft.transform(audio)
-
-            // Compute error for best-phase tracking
-            let currentError = computeReconstructionError(
-                targetMagnitude: magnitude,
-                estimatedComplex: reconstructed
+            // 1. Construct complex spectrogram from magnitude and current phase (in-place)
+            fromPolarInPlace(
+                magnitude: flatMagnitude,
+                phase: workspace.phase,
+                realOut: &workspace.currentReal,
+                imagOut: &workspace.currentImag
             )
 
-            // Track best input phase seen - ensures monotonic improvement across runs
-            // We save the input phase that produced this error, not reconstructed.phase
+            // 2. Convert to ComplexMatrix for ISTFT (temporary, but needed for existing API)
+            let complex = ContiguousComplexMatrix(
+                real: workspace.currentReal,
+                imag: workspace.currentImag,
+                rows: nFreqs,
+                cols: nFrames
+            ).toComplexMatrix()
+
+            // 3. Inverse STFT to get audio estimate
+            let audio = await istft.transform(complex, length: outputLength)
+
+            // 4. Forward STFT of audio estimate (this is G(c_n) = "rebuilt")
+            let reconstructed = await stft.transform(audio)
+
+            // Copy reconstructed to workspace current buffers
+            copyComplexMatrixToFlat(
+                reconstructed,
+                realOut: &workspace.currentReal,
+                imagOut: &workspace.currentImag
+            )
+
+            // 5. Compute error for best-phase tracking
+            let currentError = computeReconstructionErrorFlat(
+                targetMagnitude: flatMagnitude,
+                estimatedReal: workspace.currentReal,
+                estimatedImag: workspace.currentImag
+            )
+
+            // Track best phase - save BEFORE momentum is applied
             if currentError < bestError {
                 bestError = currentError
-                bestPhase = phase.map { $0 }
+                workspace.saveBestPhase()
             }
 
-            // 4. Apply Fast Griffin-Lim momentum (librosa formula)
-            // angles = rebuilt - (momentum / (1 + momentum)) * tprev
-            var angles: ComplexMatrix
-            if momentum > 0 && previousReconstructed != nil {
-                angles = applyLibrosaMomentum(
-                    rebuilt: reconstructed,
-                    tprev: previousReconstructed!,
+            // 6. Apply Fast Griffin-Lim momentum (librosa formula) in-place
+            if momentum > 0 && hasPrevious {
+                applyMomentumInPlace(
+                    currentReal: &workspace.currentReal,
+                    currentImag: &workspace.currentImag,
+                    prevReal: workspace.prevReal,
+                    prevImag: workspace.prevImag,
                     momScale: momScale
                 )
-            } else {
-                angles = reconstructed
             }
 
-            // Store current as previous for next iteration
-            previousReconstructed = reconstructed
+            // 7. Swap current to prev for next iteration (O(1) swap)
+            workspace.swapCurrentAndPrev()
+            hasPrevious = true
 
-            // 5. Extract phase (normalize to unit magnitude)
-            phase = angles.phase
+            // 8. Extract phase in-place from angles (now in prev buffers after swap)
+            extractPhaseInPlace(
+                real: workspace.prevReal,
+                imag: workspace.prevImag,
+                phaseOut: &workspace.phase
+            )
 
             // Report progress
             if let callback = onIteration {
@@ -166,106 +269,183 @@ public struct GriffinLim: Sendable {
             }
         }
 
-        // Final reconstruction with best phase seen (not just final phase)
-        // This ensures more iterations can never produce worse results
-        let finalComplex = ComplexMatrix.fromPolar(magnitude: magnitude, phase: bestPhase)
+        // Final reconstruction with best phase seen
+        fromPolarInPlace(
+            magnitude: flatMagnitude,
+            phase: workspace.bestPhase,
+            realOut: &workspace.currentReal,
+            imagOut: &workspace.currentImag
+        )
+
+        let finalComplex = ContiguousComplexMatrix(
+            real: workspace.currentReal,
+            imag: workspace.currentImag,
+            rows: nFreqs,
+            cols: nFrames
+        ).toComplexMatrix()
+
         return await istft.transform(finalComplex, length: outputLength)
     }
 
-    // MARK: - Private Implementation
+    // MARK: - Private Implementation (Optimized In-Place Operations)
 
-    /// Initialize phase matrix.
-    ///
-    /// For deterministic initialization (randomPhaseInit=false), uses zero phase
-    /// which provides a neutral starting point. Griffin-Lim will converge to a
-    /// valid phase estimate from this initialization.
-    private func initializePhase(rows: Int, cols: Int) -> [[Float]] {
-        var phase = [[Float]]()
-        phase.reserveCapacity(rows)
+    /// Flatten a 2D matrix to 1D array (row-major order).
+    private func flattenMatrix(_ matrix: [[Float]]) -> [Float] {
+        matrix.flatMap { $0 }
+    }
 
-        if randomPhaseInit {
-            // Random phase in [-pi, pi]
-            for _ in 0..<rows {
-                let row = (0..<cols).map { _ in Float.random(in: -Float.pi...Float.pi) }
-                phase.append(row)
-            }
-        } else {
-            // Zero phase initialization - simple and effective
-            for _ in 0..<rows {
-                let row = [Float](repeating: 0, count: cols)
-                phase.append(row)
-            }
+    /// Convert polar (magnitude, phase) to rectangular (real, imag) in-place using vDSP.
+    private func fromPolarInPlace(
+        magnitude: [Float],
+        phase: [Float],
+        realOut: inout [Float],
+        imagOut: inout [Float]
+    ) {
+        let count = magnitude.count
+        precondition(phase.count == count)
+        precondition(realOut.count == count)
+        precondition(imagOut.count == count)
+
+        // Compute cos(phase) and sin(phase) using vectorized operations
+        var cosVals = [Float](repeating: 0, count: count)
+        var sinVals = [Float](repeating: 0, count: count)
+        var n = Int32(count)
+
+        phase.withUnsafeBufferPointer { phasePtr in
+            vvcosf(&cosVals, phasePtr.baseAddress!, &n)
+            vvsinf(&sinVals, phasePtr.baseAddress!, &n)
         }
 
-        return phase
+        // real = magnitude * cos(phase)
+        // imag = magnitude * sin(phase)
+        magnitude.withUnsafeBufferPointer { magPtr in
+            vDSP_vmul(magPtr.baseAddress!, 1, cosVals, 1, &realOut, 1, vDSP_Length(count))
+            vDSP_vmul(magPtr.baseAddress!, 1, sinVals, 1, &imagOut, 1, vDSP_Length(count))
+        }
     }
 
-    /// Compute the shortest angular difference between two angles.
-    ///
-    /// This correctly handles wrap-around at ±π and always returns
-    /// a value in [-π, π] representing the shortest path from b to a.
-    @inline(__always)
-    private func angularDifference(_ a: Float, _ b: Float) -> Float {
-        let diff = a - b
-        // atan2(sin, cos) correctly handles wrap-around
-        return atan2(sin(diff), cos(diff))
+    /// Extract phase from complex numbers in-place using vDSP.
+    private func extractPhaseInPlace(
+        real: [Float],
+        imag: [Float],
+        phaseOut: inout [Float]
+    ) {
+        let count = real.count
+        precondition(imag.count == count)
+        precondition(phaseOut.count == count)
+
+        real.withUnsafeBufferPointer { realPtr in
+            imag.withUnsafeBufferPointer { imagPtr in
+                phaseOut.withUnsafeMutableBufferPointer { outPtr in
+                    var n = Int32(count)
+                    vvatan2f(outPtr.baseAddress!, imagPtr.baseAddress!, realPtr.baseAddress!, &n)
+                }
+            }
+        }
     }
 
-    /// Apply momentum update in complex domain (librosa's Fast Griffin-Lim formula).
-    ///
-    /// Librosa uses: angles = rebuilt - (momentum / (1 + momentum)) * tprev
-    /// where rebuilt is G(c_n) and tprev is G(c_{n-1}).
-    ///
-    /// This is then normalized to unit magnitude to extract phase.
-    private func applyLibrosaMomentum(
-        rebuilt: ComplexMatrix,
-        tprev: ComplexMatrix,
+    /// Apply momentum in-place: current = current - momScale * prev
+    private func applyMomentumInPlace(
+        currentReal: inout [Float],
+        currentImag: inout [Float],
+        prevReal: [Float],
+        prevImag: [Float],
         momScale: Float
-    ) -> ComplexMatrix {
-        let rows = rebuilt.rows
-        let cols = rebuilt.cols
+    ) {
+        let count = currentReal.count
+        var negMomScale = -momScale
 
-        var resultReal = [[Float]]()
-        var resultImag = [[Float]]()
-        resultReal.reserveCapacity(rows)
-        resultImag.reserveCapacity(rows)
-
-        for i in 0..<rows {
-            var rowReal = [Float](repeating: 0, count: cols)
-            var rowImag = [Float](repeating: 0, count: cols)
-
-            for j in 0..<cols {
-                // angles = rebuilt - momScale * tprev
-                rowReal[j] = rebuilt.real[i][j] - momScale * tprev.real[i][j]
-                rowImag[j] = rebuilt.imag[i][j] - momScale * tprev.imag[i][j]
+        // currentReal += (-momScale) * prevReal
+        // currentImag += (-momScale) * prevImag
+        prevReal.withUnsafeBufferPointer { prevRealPtr in
+            currentReal.withUnsafeMutableBufferPointer { currRealPtr in
+                vDSP_vsma(
+                    prevRealPtr.baseAddress!, 1,
+                    &negMomScale,
+                    currRealPtr.baseAddress!, 1,
+                    currRealPtr.baseAddress!, 1,
+                    vDSP_Length(count)
+                )
             }
-
-            resultReal.append(rowReal)
-            resultImag.append(rowImag)
         }
 
-        return ComplexMatrix(real: resultReal, imag: resultImag)
+        prevImag.withUnsafeBufferPointer { prevImagPtr in
+            currentImag.withUnsafeMutableBufferPointer { currImagPtr in
+                vDSP_vsma(
+                    prevImagPtr.baseAddress!, 1,
+                    &negMomScale,
+                    currImagPtr.baseAddress!, 1,
+                    currImagPtr.baseAddress!, 1,
+                    vDSP_Length(count)
+                )
+            }
+        }
     }
 
-    /// Compute reconstruction error (for monitoring convergence).
-    private func computeReconstructionError(
-        targetMagnitude: [[Float]],
-        estimatedComplex: ComplexMatrix
-    ) -> Float {
-        let estimatedMag = estimatedComplex.magnitude
-        let rows = targetMagnitude.count
-        let cols = targetMagnitude[0].count
-
-        var sumSquaredError: Float = 0
-        var sumTargetSquared: Float = 0
-
-        for i in 0..<rows {
-            for j in 0..<cols {
-                let diff = targetMagnitude[i][j] - estimatedMag[i][j]
-                sumSquaredError += diff * diff
-                sumTargetSquared += targetMagnitude[i][j] * targetMagnitude[i][j]
+    /// Copy ComplexMatrix data to flat arrays.
+    /// Note: The workspace dimensions must match the matrix dimensions.
+    private func copyComplexMatrixToFlat(
+        _ matrix: ComplexMatrix,
+        realOut: inout [Float],
+        imagOut: inout [Float]
+    ) {
+        let outputCount = realOut.count
+        var idx = 0
+        for row in 0..<matrix.rows {
+            for col in 0..<matrix.cols {
+                if idx < outputCount {
+                    realOut[idx] = matrix.real[row][col]
+                    imagOut[idx] = matrix.imag[row][col]
+                    idx += 1
+                }
             }
         }
+        // Zero any remaining elements if matrix is smaller
+        while idx < outputCount {
+            realOut[idx] = 0
+            imagOut[idx] = 0
+            idx += 1
+        }
+    }
+
+    /// Compute reconstruction error using flat arrays (optimized with vDSP).
+    private func computeReconstructionErrorFlat(
+        targetMagnitude: [Float],
+        estimatedReal: [Float],
+        estimatedImag: [Float]
+    ) -> Float {
+        let count = targetMagnitude.count
+
+        // Compute estimated magnitude using vDSP_vdist
+        var estimatedMag = [Float](repeating: 0, count: count)
+        estimatedReal.withUnsafeBufferPointer { realPtr in
+            estimatedImag.withUnsafeBufferPointer { imagPtr in
+                estimatedMag.withUnsafeMutableBufferPointer { outPtr in
+                    vDSP_vdist(
+                        realPtr.baseAddress!, 1,
+                        imagPtr.baseAddress!, 1,
+                        outPtr.baseAddress!, 1,
+                        vDSP_Length(count)
+                    )
+                }
+            }
+        }
+
+        // Compute difference: diff = target - estimated
+        var diff = [Float](repeating: 0, count: count)
+        targetMagnitude.withUnsafeBufferPointer { targetPtr in
+            estimatedMag.withUnsafeBufferPointer { estPtr in
+                vDSP_vsub(estPtr.baseAddress!, 1, targetPtr.baseAddress!, 1, &diff, 1, vDSP_Length(count))
+            }
+        }
+
+        // Compute sum of squared differences
+        var sumSquaredError: Float = 0
+        vDSP_svesq(diff, 1, &sumSquaredError, vDSP_Length(count))
+
+        // Compute sum of squared target
+        var sumTargetSquared: Float = 0
+        vDSP_svesq(targetMagnitude, 1, &sumTargetSquared, vDSP_Length(count))
 
         // Return normalized error
         if sumTargetSquared > 0 {

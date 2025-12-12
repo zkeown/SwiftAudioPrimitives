@@ -191,8 +191,8 @@ public actor BenchmarkRunner {
 
         for _ in 0..<config.measureIterations {
             if config.gcBetweenIterations {
-                // Force ARC collection
-                autoreleasepool { }
+                // Force autorelease pool drain before iteration
+                _ = autoreleasepool { () -> Int in 0 }
             }
 
             try await setup?()

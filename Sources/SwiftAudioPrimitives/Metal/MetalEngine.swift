@@ -2,6 +2,73 @@ import Accelerate
 import Foundation
 import Metal
 
+/// Pool of reusable MTLBuffers to reduce allocation overhead.
+///
+/// Buffers are organized by size class (powers of 2) for efficient reuse.
+/// This significantly reduces allocation overhead for repeated Metal operations.
+final class MetalBufferPool: @unchecked Sendable {
+    private let device: MTLDevice
+    private var pools: [Int: [MTLBuffer]] = [:]  // Size class -> available buffers
+    private let maxBuffersPerClass = 4
+    private let lock = NSLock()
+
+    init(device: MTLDevice) {
+        self.device = device
+    }
+
+    /// Get the size class for a given byte count (next power of 2, min 4KB).
+    private func sizeClass(for bytes: Int) -> Int {
+        let minSize = 4096  // 4KB minimum
+        let size = max(bytes, minSize)
+        // Round up to next power of 2
+        var power = 1
+        while power < size {
+            power *= 2
+        }
+        return power
+    }
+
+    /// Acquire a buffer of at least the specified size.
+    func acquire(minBytes: Int) -> MTLBuffer? {
+        let sizeClass = sizeClass(for: minBytes)
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        // Check if we have a cached buffer
+        if var available = pools[sizeClass], !available.isEmpty {
+            let buffer = available.removeLast()
+            pools[sizeClass] = available
+            return buffer
+        }
+
+        // Create new buffer
+        return device.makeBuffer(length: sizeClass, options: .storageModeShared)
+    }
+
+    /// Release a buffer back to the pool.
+    func release(_ buffer: MTLBuffer) {
+        let sizeClass = sizeClass(for: buffer.length)
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        var available = pools[sizeClass] ?? []
+        if available.count < maxBuffersPerClass {
+            available.append(buffer)
+            pools[sizeClass] = available
+        }
+        // If pool is full, let buffer be deallocated
+    }
+
+    /// Clear all pooled buffers.
+    func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        pools.removeAll()
+    }
+}
+
 /// Errors that can occur during Metal operations.
 public enum MetalEngineError: Error, Sendable {
     case deviceNotAvailable
@@ -61,6 +128,9 @@ public actor MetalEngine {
     /// Cached pipeline states.
     private var pipelineCache: [String: MTLComputePipelineState] = [:]
 
+    /// Buffer pool for reusing MTLBuffers.
+    private let bufferPool: MetalBufferPool
+
     // MARK: - Initialization
 
     /// Check if Metal is available on this device.
@@ -105,6 +175,14 @@ public actor MetalEngine {
         } catch {
             throw MetalEngineError.libraryLoadFailed("Failed to load Metal library: \(error)")
         }
+
+        // Initialize buffer pool
+        self.bufferPool = MetalBufferPool(device: device)
+    }
+
+    /// Clear the buffer pool to release cached GPU memory.
+    public func clearBufferPool() {
+        bufferPool.clear()
     }
 
     // MARK: - Pipeline Management
@@ -152,31 +230,30 @@ public actor MetalEngine {
         // Flatten frames for GPU transfer
         let flatFrames = frames.flatMap { $0 }
 
-        // Create buffers
-        guard let framesBuffer = device.makeBuffer(
-            bytes: flatFrames,
-            length: flatFrames.count * MemoryLayout<Float>.size,
-            options: .storageModeShared
-        ) else {
-            throw MetalEngineError.bufferCreationFailed
-        }
+        let framesBytes = flatFrames.count * MemoryLayout<Float>.size
+        let windowBytes = window.count * MemoryLayout<Float>.size
+        let outputBytes = outputLength * MemoryLayout<Float>.size
 
-        guard let windowBuffer = device.makeBuffer(
-            bytes: window,
-            length: window.count * MemoryLayout<Float>.size,
-            options: .storageModeShared
-        ) else {
+        // Acquire buffers from pool
+        guard let framesBuffer = bufferPool.acquire(minBytes: framesBytes) else {
             throw MetalEngineError.bufferCreationFailed
         }
+        defer { bufferPool.release(framesBuffer) }
 
-        // Output buffer initialized to zero
-        guard let outputBuffer = device.makeBuffer(
-            length: outputLength * MemoryLayout<Float>.size,
-            options: .storageModeShared
-        ) else {
+        guard let windowBuffer = bufferPool.acquire(minBytes: windowBytes) else {
             throw MetalEngineError.bufferCreationFailed
         }
-        memset(outputBuffer.contents(), 0, outputLength * MemoryLayout<Float>.size)
+        defer { bufferPool.release(windowBuffer) }
+
+        guard let outputBuffer = bufferPool.acquire(minBytes: outputBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer { bufferPool.release(outputBuffer) }
+
+        // Copy data to buffers
+        memcpy(framesBuffer.contents(), flatFrames, framesBytes)
+        memcpy(windowBuffer.contents(), window, windowBytes)
+        memset(outputBuffer.contents(), 0, outputBytes)
 
         // Constants
         var frameCountVar = UInt32(frameCount)
@@ -242,23 +319,29 @@ public actor MetalEngine {
         let flatSpec = spectrogram.flatMap { $0 }
         let flatFilter = filterbank.flatMap { $0 }
 
-        // Create buffers
-        guard let specBuffer = device.makeBuffer(
-            bytes: flatSpec,
-            length: flatSpec.count * MemoryLayout<Float>.size,
-            options: .storageModeShared
-        ),
-        let filterBuffer = device.makeBuffer(
-            bytes: flatFilter,
-            length: flatFilter.count * MemoryLayout<Float>.size,
-            options: .storageModeShared
-        ),
-        let outputBuffer = device.makeBuffer(
-            length: nMels * nFrames * MemoryLayout<Float>.size,
-            options: .storageModeShared
-        ) else {
+        let specBytes = flatSpec.count * MemoryLayout<Float>.size
+        let filterBytes = flatFilter.count * MemoryLayout<Float>.size
+        let outputBytes = nMels * nFrames * MemoryLayout<Float>.size
+
+        // Acquire buffers from pool
+        guard let specBuffer = bufferPool.acquire(minBytes: specBytes) else {
             throw MetalEngineError.bufferCreationFailed
         }
+        defer { bufferPool.release(specBuffer) }
+
+        guard let filterBuffer = bufferPool.acquire(minBytes: filterBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer { bufferPool.release(filterBuffer) }
+
+        guard let outputBuffer = bufferPool.acquire(minBytes: outputBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer { bufferPool.release(outputBuffer) }
+
+        // Copy data to buffers
+        memcpy(specBuffer.contents(), flatSpec, specBytes)
+        memcpy(filterBuffer.contents(), flatFilter, filterBytes)
 
         // Constants
         var nFreqsVar = UInt32(nFreqs)
@@ -333,6 +416,7 @@ public actor MetalEngine {
         let rows = aReal.count
         let cols = aReal[0].count
         let count = rows * cols
+        let bufferBytes = count * MemoryLayout<Float>.size
 
         // Flatten
         let flatAR = aReal.flatMap { $0 }
@@ -340,15 +424,42 @@ public actor MetalEngine {
         let flatBR = bReal.flatMap { $0 }
         let flatBI = bImag.flatMap { $0 }
 
-        // Create buffers
-        guard let arBuffer = device.makeBuffer(bytes: flatAR, length: count * MemoryLayout<Float>.size, options: .storageModeShared),
-              let aiBuffer = device.makeBuffer(bytes: flatAI, length: count * MemoryLayout<Float>.size, options: .storageModeShared),
-              let brBuffer = device.makeBuffer(bytes: flatBR, length: count * MemoryLayout<Float>.size, options: .storageModeShared),
-              let biBuffer = device.makeBuffer(bytes: flatBI, length: count * MemoryLayout<Float>.size, options: .storageModeShared),
-              let outRBuffer = device.makeBuffer(length: count * MemoryLayout<Float>.size, options: .storageModeShared),
-              let outIBuffer = device.makeBuffer(length: count * MemoryLayout<Float>.size, options: .storageModeShared) else {
+        // Acquire buffers from pool
+        guard let arBuffer = bufferPool.acquire(minBytes: bufferBytes) else {
             throw MetalEngineError.bufferCreationFailed
         }
+        defer { bufferPool.release(arBuffer) }
+
+        guard let aiBuffer = bufferPool.acquire(minBytes: bufferBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer { bufferPool.release(aiBuffer) }
+
+        guard let brBuffer = bufferPool.acquire(minBytes: bufferBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer { bufferPool.release(brBuffer) }
+
+        guard let biBuffer = bufferPool.acquire(minBytes: bufferBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer { bufferPool.release(biBuffer) }
+
+        guard let outRBuffer = bufferPool.acquire(minBytes: bufferBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer { bufferPool.release(outRBuffer) }
+
+        guard let outIBuffer = bufferPool.acquire(minBytes: bufferBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer { bufferPool.release(outIBuffer) }
+
+        // Copy data to buffers
+        memcpy(arBuffer.contents(), flatAR, bufferBytes)
+        memcpy(aiBuffer.contents(), flatAI, bufferBytes)
+        memcpy(brBuffer.contents(), flatBR, bufferBytes)
+        memcpy(biBuffer.contents(), flatBI, bufferBytes)
 
         var countVar = UInt32(count)
 

@@ -159,13 +159,22 @@ public struct FormatConverter: Sendable {
     // MARK: - Int16 Conversion
 
     private static func convertToInt16(_ samples: [Float]) -> Data {
-        var int16Samples = [Int16](repeating: 0, count: samples.count)
+        let count = samples.count
 
-        for (i, sample) in samples.enumerated() {
-            // Clamp and scale
-            let clamped = max(-1.0, min(1.0, sample))
-            int16Samples[i] = Int16(clamped * Float(Int16.max))
-        }
+        // Clamp samples to [-1, 1]
+        var clampedSamples = [Float](repeating: 0, count: count)
+        var minVal: Float = -1.0
+        var maxVal: Float = 1.0
+        vDSP_vclip(samples, 1, &minVal, &maxVal, &clampedSamples, 1, vDSP_Length(count))
+
+        // Scale to Int16 range
+        var scale = Float(Int16.max)
+        var scaledSamples = [Float](repeating: 0, count: count)
+        vDSP_vsmul(clampedSamples, 1, &scale, &scaledSamples, 1, vDSP_Length(count))
+
+        // Convert to Int16
+        var int16Samples = [Int16](repeating: 0, count: count)
+        vDSP_vfix16(scaledSamples, 1, &int16Samples, 1, vDSP_Length(count))
 
         return int16Samples.withUnsafeBytes { Data($0) }
     }
@@ -175,11 +184,15 @@ public struct FormatConverter: Sendable {
             Array(ptr.bindMemory(to: Int16.self))
         }
 
-        var floatSamples = [Float](repeating: 0, count: int16Samples.count)
+        let count = int16Samples.count
+        var floatSamples = [Float](repeating: 0, count: count)
 
-        for (i, sample) in int16Samples.enumerated() {
-            floatSamples[i] = Float(sample) / Float(Int16.max)
-        }
+        // Convert Int16 to Float
+        vDSP_vflt16(int16Samples, 1, &floatSamples, 1, vDSP_Length(count))
+
+        // Scale to [-1, 1] range
+        var scale = 1.0 / Float(Int16.max)
+        vDSP_vsmul(floatSamples, 1, &scale, &floatSamples, 1, vDSP_Length(count))
 
         return floatSamples
     }
@@ -227,12 +240,22 @@ public struct FormatConverter: Sendable {
     // MARK: - Int32 Conversion
 
     private static func convertToInt32(_ samples: [Float]) -> Data {
-        var int32Samples = [Int32](repeating: 0, count: samples.count)
+        let count = samples.count
 
-        for (i, sample) in samples.enumerated() {
-            let clamped = max(-1.0, min(1.0, sample))
-            int32Samples[i] = Int32(clamped * Float(Int32.max))
-        }
+        // Clamp samples to [-1, 1]
+        var clampedSamples = [Float](repeating: 0, count: count)
+        var minVal: Float = -1.0
+        var maxVal: Float = 1.0
+        vDSP_vclip(samples, 1, &minVal, &maxVal, &clampedSamples, 1, vDSP_Length(count))
+
+        // Scale to Int32 range
+        var scale = Float(Int32.max)
+        var scaledSamples = [Float](repeating: 0, count: count)
+        vDSP_vsmul(clampedSamples, 1, &scale, &scaledSamples, 1, vDSP_Length(count))
+
+        // Convert to Int32
+        var int32Samples = [Int32](repeating: 0, count: count)
+        vDSP_vfix32(scaledSamples, 1, &int32Samples, 1, vDSP_Length(count))
 
         return int32Samples.withUnsafeBytes { Data($0) }
     }
@@ -242,11 +265,15 @@ public struct FormatConverter: Sendable {
             Array(ptr.bindMemory(to: Int32.self))
         }
 
-        var floatSamples = [Float](repeating: 0, count: int32Samples.count)
+        let count = int32Samples.count
+        var floatSamples = [Float](repeating: 0, count: count)
 
-        for (i, sample) in int32Samples.enumerated() {
-            floatSamples[i] = Float(sample) / Float(Int32.max)
-        }
+        // Convert Int32 to Float
+        vDSP_vflt32(int32Samples, 1, &floatSamples, 1, vDSP_Length(count))
+
+        // Scale to [-1, 1] range
+        var scale = 1.0 / Float(Int32.max)
+        vDSP_vsmul(floatSamples, 1, &scale, &floatSamples, 1, vDSP_Length(count))
 
         return floatSamples
     }
@@ -254,6 +281,8 @@ public struct FormatConverter: Sendable {
     // MARK: - Interleaving
 
     /// Interleave multi-channel audio.
+    ///
+    /// Uses vDSP strided operations for optimal performance.
     ///
     /// - Parameter channels: Array of channel data.
     /// - Returns: Interleaved samples [L0, R0, L1, R1, ...].
@@ -265,9 +294,22 @@ public struct FormatConverter: Sendable {
         let frameCount = channels[0].count
         var interleaved = [Float](repeating: 0, count: channelCount * frameCount)
 
-        for frame in 0..<frameCount {
-            for channel in 0..<channelCount {
-                interleaved[frame * channelCount + channel] = channels[channel][frame]
+        // Use vDSP strided copy for each channel
+        // Copy channel[c] to every channelCount-th position starting at offset c
+        for (c, channel) in channels.enumerated() {
+            channel.withUnsafeBufferPointer { srcPtr in
+                interleaved.withUnsafeMutableBufferPointer { dstPtr in
+                    // vDSP_mmov copies with strides
+                    // Source stride: 1 (contiguous channel data)
+                    // Dest stride: channelCount (interleaved positions)
+                    cblas_scopy(
+                        Int32(frameCount),
+                        srcPtr.baseAddress!,
+                        1,                                    // Source stride
+                        dstPtr.baseAddress! + c,
+                        Int32(channelCount)                   // Dest stride
+                    )
+                }
             }
         }
 
@@ -275,6 +317,8 @@ public struct FormatConverter: Sendable {
     }
 
     /// Deinterleave audio to separate channels.
+    ///
+    /// Uses vDSP strided operations for optimal performance.
     ///
     /// - Parameters:
     ///   - samples: Interleaved samples.
@@ -288,11 +332,24 @@ public struct FormatConverter: Sendable {
         var channels = [[Float]]()
         channels.reserveCapacity(channelCount)
 
-        for channel in 0..<channelCount {
+        // Use cblas_scopy with strides for each channel
+        for c in 0..<channelCount {
             var channelData = [Float](repeating: 0, count: frameCount)
-            for frame in 0..<frameCount {
-                channelData[frame] = samples[frame * channelCount + channel]
+
+            samples.withUnsafeBufferPointer { srcPtr in
+                channelData.withUnsafeMutableBufferPointer { dstPtr in
+                    // Source stride: channelCount (skip other channels)
+                    // Dest stride: 1 (contiguous output)
+                    cblas_scopy(
+                        Int32(frameCount),
+                        srcPtr.baseAddress! + c,
+                        Int32(channelCount),                   // Source stride
+                        dstPtr.baseAddress!,
+                        1                                       // Dest stride
+                    )
+                }
             }
+
             channels.append(channelData)
         }
 

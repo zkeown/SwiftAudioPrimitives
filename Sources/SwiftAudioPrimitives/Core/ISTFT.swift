@@ -1,23 +1,50 @@
 import Accelerate
 import Foundation
 
-/// Inverse Short-Time Fourier Transform.
+/// Inverse Short-Time Fourier Transform with automatic GPU/CPU dispatch.
+///
+/// Uses Metal GPU acceleration for large spectrograms and optimized
+/// vDSP operations for CPU fallback.
 public struct ISTFT: Sendable {
     public let config: STFTConfig
 
     private let window: [Float]
     private let fftSetupWrapper: FFTSetupWrapper
 
+    /// Pre-computed squared window for normalization.
+    private let windowSquared: [Float]
+
+    /// Optional Metal engine for GPU acceleration.
+    private let metalEngine: MetalEngine?
+
+    /// Whether to prefer GPU acceleration when available.
+    public let useGPU: Bool
+
     /// Create ISTFT processor.
     ///
-    /// - Parameter config: STFT configuration (should match the STFT used to create the spectrogram).
-    public init(config: STFTConfig = STFTConfig()) {
+    /// - Parameters:
+    ///   - config: STFT configuration (should match the STFT used to create the spectrogram).
+    ///   - useGPU: Prefer GPU acceleration when available (default: true).
+    public init(config: STFTConfig = STFTConfig(), useGPU: Bool = true) {
         self.config = config
+        self.useGPU = useGPU
         self.window = Windows.generate(config.windowType, length: config.winLength, periodic: true)
+
+        // Pre-compute squared window for normalization
+        var squared = [Float](repeating: 0, count: config.winLength)
+        vDSP_vsq(window, 1, &squared, 1, vDSP_Length(config.winLength))
+        self.windowSquared = squared
 
         // Create FFT setup
         let log2n = vDSP_Length(log2(Double(config.nFFT)))
         self.fftSetupWrapper = FFTSetupWrapper(log2n: log2n)
+
+        // Initialize Metal engine if GPU is preferred and available
+        if useGPU && MetalEngine.isAvailable {
+            self.metalEngine = try? MetalEngine()
+        } else {
+            self.metalEngine = nil
+        }
     }
 
     /// Reconstruct signal from complex spectrogram.
@@ -45,15 +72,10 @@ public struct ISTFT: Sendable {
             ? expectedLength + config.nFFT
             : config.nFFT + (nFrames - 1) * config.hopLength
 
-        // Initialize output buffer and normalization buffer
-        var output = [Float](repeating: 0, count: bufferLength)
-        var windowSum = [Float](repeating: 0, count: bufferLength)
+        // Compute all IFFTs first (this is the CPU-bound part)
+        var frames = [[Float]]()
+        frames.reserveCapacity(nFrames)
 
-        // Squared window for normalization
-        var windowSquared = [Float](repeating: 0, count: config.winLength)
-        vDSP_vsq(window, 1, &windowSquared, 1, vDSP_Length(config.winLength))
-
-        // Process each frame
         for frameIdx in 0..<nFrames {
             // Extract complex frame
             var frameReal = [Float](repeating: 0, count: config.nFreqs)
@@ -64,21 +86,60 @@ public struct ISTFT: Sendable {
                 frameImag[freqIdx] = spectrogram.imag[freqIdx][frameIdx]
             }
 
-            // Compute inverse FFT
+            // Compute inverse FFT and truncate to window length
             let reconstructedFrame = computeIFFT(real: frameReal, imag: frameImag)
+            frames.append(Array(reconstructedFrame.prefix(config.winLength)))
+        }
 
-            // Apply synthesis window
-            var windowedFrame = [Float](repeating: 0, count: config.winLength)
-            for i in 0..<config.winLength {
-                windowedFrame[i] = reconstructedFrame[i] * window[i]
+        // Decide GPU vs CPU for overlap-add
+        let elementCount = nFrames * config.winLength
+        var output: [Float]
+
+        if let engine = metalEngine, MetalEngine.shouldUseGPU(elementCount: elementCount) {
+            // GPU path: use Metal overlap-add kernel
+            do {
+                output = try await engine.overlapAdd(
+                    frames: frames,
+                    window: window,
+                    hopLength: config.hopLength,
+                    outputLength: bufferLength
+                )
+                // GPU overlap-add doesn't do normalization, so we need to compute windowSum
+                // and normalize manually (or use a separate kernel)
+                output = normalizeOutput(output, nFrames: nFrames, bufferLength: bufferLength)
+            } catch {
+                // Fall back to CPU on GPU error
+                output = overlapAddCPU(frames: frames, bufferLength: bufferLength)
             }
+        } else {
+            // CPU path: optimized overlap-add with vDSP
+            output = overlapAddCPU(frames: frames, bufferLength: bufferLength)
+        }
 
-            // Overlap-add
+        // Remove padding if centered
+        if config.center {
+            let padLength = config.nFFT / 2
+            let startIdx = padLength
+            let endIdx = min(startIdx + expectedLength, bufferLength)
+            return Array(output[startIdx..<endIdx])
+        } else {
+            return Array(output.prefix(expectedLength))
+        }
+    }
+
+    /// CPU overlap-add with window normalization.
+    private func overlapAddCPU(frames: [[Float]], bufferLength: Int) -> [Float] {
+        var output = [Float](repeating: 0, count: bufferLength)
+        var windowSum = [Float](repeating: 0, count: bufferLength)
+
+        for (frameIdx, frame) in frames.enumerated() {
             let startIdx = frameIdx * config.hopLength
-            for i in 0..<config.winLength {
+
+            // Apply window and accumulate
+            for i in 0..<min(frame.count, config.winLength) {
                 let outputIdx = startIdx + i
                 if outputIdx < bufferLength {
-                    output[outputIdx] += windowedFrame[i]
+                    output[outputIdx] += frame[i] * window[i]
                     windowSum[outputIdx] += windowSquared[i]
                 }
             }
@@ -92,15 +153,34 @@ public struct ISTFT: Sendable {
             }
         }
 
-        // Remove padding if centered
-        if config.center {
-            let padLength = config.nFFT / 2
-            let startIdx = padLength
-            let endIdx = min(startIdx + expectedLength, bufferLength)
-            return Array(output[startIdx..<endIdx])
-        } else {
-            return Array(output.prefix(expectedLength))
+        return output
+    }
+
+    /// Normalize GPU overlap-add output by window sum.
+    private func normalizeOutput(_ output: [Float], nFrames: Int, bufferLength: Int) -> [Float] {
+        // Compute window sum for normalization
+        var windowSum = [Float](repeating: 0, count: bufferLength)
+
+        for frameIdx in 0..<nFrames {
+            let startIdx = frameIdx * config.hopLength
+            for i in 0..<config.winLength {
+                let outputIdx = startIdx + i
+                if outputIdx < bufferLength {
+                    windowSum[outputIdx] += windowSquared[i]
+                }
+            }
         }
+
+        // Normalize
+        var result = output
+        let epsilon: Float = 1e-8
+        for i in 0..<min(result.count, bufferLength) {
+            if windowSum[i] > epsilon {
+                result[i] /= windowSum[i]
+            }
+        }
+
+        return result
     }
 
     // MARK: - Private Implementation

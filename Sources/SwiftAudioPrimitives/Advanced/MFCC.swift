@@ -40,6 +40,13 @@ public struct MFCC: Sendable {
     /// Cached liftering weights.
     private let lifterWeights: [Float]?
 
+    /// Cached DCT matrix in flat row-major format for vDSP_mmul.
+    /// Shape: (nMFCC, nMels) stored as flat array of size nMFCC * nMels.
+    private let cachedDCTMatrix: [Float]
+
+    /// Number of mel bands for this instance.
+    private let nMels: Int
+
     /// Create an MFCC extractor.
     ///
     /// - Parameters:
@@ -85,6 +92,10 @@ public struct MFCC: Sendable {
         self.nMFCC = min(nMFCC, nMels)
         self.dctType = dctType
         self.lifter = lifter
+        self.nMels = nMels
+
+        // Pre-compute and cache DCT matrix in flat format for vDSP_mmul
+        self.cachedDCTMatrix = Self.computeFlatDCTMatrix(nMels: nMels, nMFCC: self.nMFCC)
 
         // Pre-compute liftering weights if needed
         if lifter > 0 {
@@ -130,8 +141,8 @@ public struct MFCC: Sendable {
     ///
     /// - Parameter powerSpec: Power spectrogram of shape (nFreqs, nFrames).
     /// - Returns: MFCC matrix of shape (nMFCC, nFrames).
-    public func fromPowerSpectrogram(_ powerSpec: [[Float]]) -> [[Float]] {
-        let melSpec = melSpectrogram.fromPower(powerSpec)
+    public func fromPowerSpectrogram(_ powerSpec: [[Float]]) async -> [[Float]] {
+        let melSpec = await melSpectrogram.fromPower(powerSpec)
         return fromMelSpectrogram(melSpec)
     }
 
@@ -160,29 +171,45 @@ public struct MFCC: Sendable {
     }
 
     /// Apply DCT-II to transform mel spectrum to cepstral coefficients.
+    ///
+    /// Uses vDSP_mmul for optimized matrix multiplication:
+    /// mfcc = dctMatrix (nMFCC x nMels) * logMel (nMels x nFrames) = result (nMFCC x nFrames)
     private func applyDCT(_ logMel: [[Float]]) -> [[Float]] {
-        let nMels = logMel.count
+        let inputMels = logMel.count
         let nFrames = logMel[0].count
 
-        // Pre-compute DCT-II matrix
-        let dctMatrix = computeDCTMatrix(nMels: nMels, nMFCC: nMFCC)
+        // Flatten logMel to row-major format (nMels x nFrames)
+        var flatLogMel = [Float](repeating: 0, count: inputMels * nFrames)
+        for m in 0..<inputMels {
+            for t in 0..<nFrames {
+                flatLogMel[m * nFrames + t] = logMel[m][t]
+            }
+        }
 
-        // Apply DCT to each frame: mfcc = dctMatrix * logMel
+        // Allocate output (nMFCC x nFrames)
+        var flatMFCC = [Float](repeating: 0, count: nMFCC * nFrames)
+
+        // Matrix multiply using vDSP_mmul
+        // C = A * B where:
+        // A = cachedDCTMatrix (nMFCC x nMels), row-major
+        // B = flatLogMel (nMels x nFrames), row-major
+        // C = flatMFCC (nMFCC x nFrames), row-major
+        vDSP_mmul(
+            cachedDCTMatrix, 1,         // A matrix
+            flatLogMel, 1,              // B matrix
+            &flatMFCC, 1,               // C result
+            vDSP_Length(nMFCC),         // M: rows of A and C
+            vDSP_Length(nFrames),       // N: columns of B and C
+            vDSP_Length(nMels)          // K: columns of A, rows of B
+        )
+
+        // Reshape to [[Float]]
         var mfcc = [[Float]]()
         mfcc.reserveCapacity(nMFCC)
 
         for k in 0..<nMFCC {
-            var mfccRow = [Float](repeating: 0, count: nFrames)
-
-            for t in 0..<nFrames {
-                var sum: Float = 0
-                for m in 0..<nMels {
-                    sum += dctMatrix[k][m] * logMel[m][t]
-                }
-                mfccRow[t] = sum
-            }
-
-            mfcc.append(mfccRow)
+            let start = k * nFrames
+            mfcc.append(Array(flatMFCC[start..<(start + nFrames)]))
         }
 
         return mfcc
@@ -245,6 +272,32 @@ public struct MFCC: Sendable {
         }
 
         return weights
+    }
+
+    /// Compute flat DCT-II matrix for vDSP_mmul.
+    ///
+    /// Returns matrix in row-major format (nMFCC x nMels) as flat array.
+    private static func computeFlatDCTMatrix(nMels: Int, nMFCC: Int) -> [Float] {
+        var matrix = [Float](repeating: 0, count: nMFCC * nMels)
+
+        let scale = sqrt(2.0 / Float(nMels))
+
+        for k in 0..<nMFCC {
+            for m in 0..<nMels {
+                // DCT-II formula: cos(pi * k * (m + 0.5) / N)
+                let angle = Float.pi * Float(k) * (Float(m) + 0.5) / Float(nMels)
+                var value = scale * cos(angle)
+
+                // First coefficient gets different scaling
+                if k == 0 {
+                    value *= Float(1.0 / sqrt(2.0))
+                }
+
+                matrix[k * nMels + m] = value
+            }
+        }
+
+        return matrix
     }
 }
 

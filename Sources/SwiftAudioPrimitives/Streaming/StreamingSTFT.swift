@@ -1,6 +1,37 @@
 import Accelerate
 import Foundation
 
+/// Reusable workspace for streaming FFT computation to minimize allocations.
+final class StreamingFFTWorkspace: @unchecked Sendable {
+    /// Split complex buffers for FFT input.
+    var realInput: [Float]
+    var imagInput: [Float]
+    /// Output buffers for FFT result.
+    var fftReal: [Float]
+    var fftImag: [Float]
+    /// Windowed frame buffer.
+    var windowedFrame: [Float]
+    /// Frame extraction buffer.
+    var frameBuffer: [Float]
+
+    /// Create a workspace for the given FFT size.
+    init(nFFT: Int) {
+        let halfN = nFFT / 2
+        self.realInput = [Float](repeating: 0, count: halfN)
+        self.imagInput = [Float](repeating: 0, count: halfN)
+        self.fftReal = [Float](repeating: 0, count: halfN + 1)
+        self.fftImag = [Float](repeating: 0, count: halfN + 1)
+        self.windowedFrame = [Float](repeating: 0, count: nFFT)
+        self.frameBuffer = [Float](repeating: 0, count: nFFT)
+    }
+
+    /// Reset FFT buffers to zero.
+    func resetFFTBuffers() {
+        _ = realInput.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
+        _ = imagInput.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
+    }
+}
+
 /// Real-time streaming STFT processor.
 ///
 /// `StreamingSTFT` maintains an internal ring buffer for processing audio
@@ -50,6 +81,9 @@ public actor StreamingSTFT {
     /// FFT setup wrapper.
     private let fftSetupWrapper: FFTSetupWrapper
 
+    /// Reusable workspace for FFT computation.
+    private let workspace: StreamingFFTWorkspace
+
     /// Total samples received (for debugging/stats).
     private var totalSamplesReceived: Int = 0
 
@@ -72,6 +106,9 @@ public actor StreamingSTFT {
         // Create FFT setup
         let log2n = vDSP_Length(log2(Double(config.nFFT)))
         self.fftSetupWrapper = FFTSetupWrapper(log2n: log2n)
+
+        // Create reusable workspace
+        self.workspace = StreamingFFTWorkspace(nFFT: config.nFFT)
     }
 
     // MARK: - Public Interface
@@ -88,23 +125,53 @@ public actor StreamingSTFT {
             let newSize = max(ringBuffer.count * 2, neededCapacity + config.nFFT)
             var newBuffer = [Float](repeating: 0, count: newSize)
 
-            // Copy existing samples to new buffer (oldest first)
+            // Copy existing samples to new buffer using block copies
             let readPosition = (writePosition - samplesInBuffer + ringBuffer.count) % ringBuffer.count
-            for i in 0..<samplesInBuffer {
-                let oldIdx = (readPosition + i) % ringBuffer.count
-                newBuffer[i] = ringBuffer[oldIdx]
+            if readPosition + samplesInBuffer <= ringBuffer.count {
+                // Contiguous: single block copy
+                _ = ringBuffer.withUnsafeBufferPointer { srcPtr in
+                    newBuffer.withUnsafeMutableBufferPointer { destPtr in
+                        memcpy(destPtr.baseAddress!, srcPtr.baseAddress! + readPosition, samplesInBuffer * MemoryLayout<Float>.size)
+                    }
+                }
+            } else {
+                // Wrap-around: two block copies
+                let firstChunkSize = ringBuffer.count - readPosition
+                let secondChunkSize = samplesInBuffer - firstChunkSize
+                _ = ringBuffer.withUnsafeBufferPointer { srcPtr in
+                    newBuffer.withUnsafeMutableBufferPointer { destPtr in
+                        memcpy(destPtr.baseAddress!, srcPtr.baseAddress! + readPosition, firstChunkSize * MemoryLayout<Float>.size)
+                        memcpy(destPtr.baseAddress! + firstChunkSize, srcPtr.baseAddress!, secondChunkSize * MemoryLayout<Float>.size)
+                    }
+                }
             }
 
             ringBuffer = newBuffer
             writePosition = samplesInBuffer
         }
 
-        for sample in samples {
-            ringBuffer[writePosition] = sample
-            writePosition = (writePosition + 1) % ringBuffer.count
-            samplesInBuffer += 1
+        // Block copy new samples to ring buffer
+        let sampleCount = samples.count
+        let bufferSize = ringBuffer.count
+
+        samples.withUnsafeBufferPointer { srcPtr in
+            ringBuffer.withUnsafeMutableBufferPointer { destPtr in
+                if writePosition + sampleCount <= bufferSize {
+                    // Single contiguous copy
+                    memcpy(destPtr.baseAddress! + writePosition, srcPtr.baseAddress!, sampleCount * MemoryLayout<Float>.size)
+                } else {
+                    // Wrap-around: two copies
+                    let firstChunkSize = bufferSize - writePosition
+                    let secondChunkSize = sampleCount - firstChunkSize
+                    memcpy(destPtr.baseAddress! + writePosition, srcPtr.baseAddress!, firstChunkSize * MemoryLayout<Float>.size)
+                    memcpy(destPtr.baseAddress!, srcPtr.baseAddress! + firstChunkSize, secondChunkSize * MemoryLayout<Float>.size)
+                }
+            }
         }
-        totalSamplesReceived += samples.count
+
+        writePosition = (writePosition + sampleCount) % bufferSize
+        samplesInBuffer += sampleCount
+        totalSamplesReceived += sampleCount
     }
 
     /// Pop all available STFT frames.
@@ -206,28 +273,61 @@ public actor StreamingSTFT {
 
     // MARK: - Private Implementation
 
-    /// Compute the next STFT frame from the buffer.
+    /// Compute the next STFT frame from the buffer using workspace buffers.
     private func computeNextFrame() -> ComplexMatrix? {
         guard samplesInBuffer >= config.nFFT else { return nil }
 
-        // Extract frame worth of samples
-        let frame = extractSamples(count: config.nFFT)
-        return computeFFTFrame(frame)
+        // Extract frame directly into workspace buffer (zero allocation)
+        extractSamplesIntoWorkspace()
+        return computeFFTFrameWithWorkspace()
     }
 
-    /// Extract samples from ring buffer (oldest first).
+    /// Extract samples from ring buffer (oldest first) using block copies.
     private func extractSamples(count: Int) -> [Float] {
         var samples = [Float](repeating: 0, count: count)
 
         // Calculate read position (oldest sample)
         let readPosition = (writePosition - samplesInBuffer + ringBuffer.count) % ringBuffer.count
 
-        for i in 0..<count {
-            let idx = (readPosition + i) % ringBuffer.count
-            samples[i] = ringBuffer[idx]
+        ringBuffer.withUnsafeBufferPointer { srcPtr in
+            samples.withUnsafeMutableBufferPointer { destPtr in
+                if readPosition + count <= ringBuffer.count {
+                    // Contiguous: single block copy
+                    memcpy(destPtr.baseAddress!, srcPtr.baseAddress! + readPosition, count * MemoryLayout<Float>.size)
+                } else {
+                    // Wrap-around: two block copies
+                    let firstChunkSize = ringBuffer.count - readPosition
+                    let secondChunkSize = count - firstChunkSize
+                    memcpy(destPtr.baseAddress!, srcPtr.baseAddress! + readPosition, firstChunkSize * MemoryLayout<Float>.size)
+                    memcpy(destPtr.baseAddress! + firstChunkSize, srcPtr.baseAddress!, secondChunkSize * MemoryLayout<Float>.size)
+                }
+            }
         }
 
         return samples
+    }
+
+    /// Extract samples from ring buffer directly into workspace buffer.
+    private func extractSamplesIntoWorkspace() {
+        let count = config.nFFT
+
+        // Calculate read position (oldest sample)
+        let readPosition = (writePosition - samplesInBuffer + ringBuffer.count) % ringBuffer.count
+
+        ringBuffer.withUnsafeBufferPointer { srcPtr in
+            workspace.frameBuffer.withUnsafeMutableBufferPointer { destPtr in
+                if readPosition + count <= ringBuffer.count {
+                    // Contiguous: single block copy
+                    memcpy(destPtr.baseAddress!, srcPtr.baseAddress! + readPosition, count * MemoryLayout<Float>.size)
+                } else {
+                    // Wrap-around: two block copies
+                    let firstChunkSize = ringBuffer.count - readPosition
+                    let secondChunkSize = count - firstChunkSize
+                    memcpy(destPtr.baseAddress!, srcPtr.baseAddress! + readPosition, firstChunkSize * MemoryLayout<Float>.size)
+                    memcpy(destPtr.baseAddress! + firstChunkSize, srcPtr.baseAddress!, secondChunkSize * MemoryLayout<Float>.size)
+                }
+            }
+        }
     }
 
     /// Compute FFT of a single frame.
@@ -250,7 +350,71 @@ public actor StreamingSTFT {
         return ComplexMatrix(real: real, imag: imag)
     }
 
-    /// Compute FFT using vDSP.
+    /// Compute FFT using workspace buffers (zero allocation hot path).
+    private func computeFFTFrameWithWorkspace() -> ComplexMatrix {
+        let n = config.nFFT
+        let log2n = vDSP_Length(log2(Double(n)))
+
+        // Zero out workspace windowed frame buffer
+        _ = workspace.windowedFrame.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
+
+        // Apply window using vDSP (vectorized multiply)
+        workspace.frameBuffer.withUnsafeBufferPointer { framePtr in
+            window.withUnsafeBufferPointer { windowPtr in
+                workspace.windowedFrame.withUnsafeMutableBufferPointer { outPtr in
+                    vDSP_vmul(framePtr.baseAddress!, 1, windowPtr.baseAddress!, 1, outPtr.baseAddress!, 1, vDSP_Length(config.winLength))
+                }
+            }
+        }
+
+        // Reset FFT buffers
+        workspace.resetFFTBuffers()
+
+        // Compute FFT using workspace buffers
+        workspace.realInput.withUnsafeMutableBufferPointer { realPtr in
+            workspace.imagInput.withUnsafeMutableBufferPointer { imagPtr in
+                var split = DSPSplitComplex(realp: realPtr.baseAddress!, imagp: imagPtr.baseAddress!)
+
+                workspace.windowedFrame.withUnsafeBufferPointer { inputPtr in
+                    vDSP_ctoz(
+                        UnsafePointer<DSPComplex>(OpaquePointer(inputPtr.baseAddress!)),
+                        2,
+                        &split,
+                        1,
+                        vDSP_Length(n / 2)
+                    )
+                }
+
+                vDSP_fft_zrip(fftSetupWrapper.setup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
+
+                var scale: Float = 0.5
+                vDSP_vsmul(split.realp, 1, &scale, split.realp, 1, vDSP_Length(n / 2))
+                vDSP_vsmul(split.imagp, 1, &scale, split.imagp, 1, vDSP_Length(n / 2))
+            }
+        }
+
+        // Unpack to positive frequencies into workspace output buffers
+        workspace.fftReal[0] = workspace.realInput[0]
+        workspace.fftImag[0] = 0
+
+        for i in 1..<(n / 2) {
+            workspace.fftReal[i] = workspace.realInput[i]
+            workspace.fftImag[i] = workspace.imagInput[i]
+        }
+
+        workspace.fftReal[n / 2] = workspace.imagInput[0]
+        workspace.fftImag[n / 2] = 0
+
+        // Return as ComplexMatrix with shape (nFreqs, 1) - single frame
+        // Note: We still create the ComplexMatrix structure here, but the FFT computation
+        // itself used no allocations
+        let real = workspace.fftReal.map { [$0] }
+        let imag = workspace.fftImag.map { [$0] }
+
+        return ComplexMatrix(real: real, imag: imag)
+    }
+
+    /// Compute FFT using vDSP (legacy method for flush()).
     private func computeFFT(_ input: [Float]) -> (real: [Float], imag: [Float]) {
         let n = config.nFFT
         let log2n = vDSP_Length(log2(Double(n)))
