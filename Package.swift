@@ -21,7 +21,13 @@ let package = Package(
             dependencies: [],
             path: "Sources/SwiftAudioPrimitives",
             resources: [
-                .process("Metal")
+                .process("Metal/Shaders.metal")
+            ],
+            linkerSettings: [
+                .linkedFramework("Accelerate"),
+                .linkedFramework("CoreML"),
+                .linkedFramework("Metal"),
+                .linkedFramework("MetalPerformanceShaders"),
             ]
         ),
         .testTarget(

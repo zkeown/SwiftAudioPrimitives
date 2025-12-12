@@ -74,6 +74,37 @@ final class FFTSetupWrapper: @unchecked Sendable {
     }
 }
 
+/// Reusable workspace for STFT computation to avoid per-frame allocations.
+///
+/// This class holds pre-allocated buffers that are reused across frames,
+/// significantly reducing memory allocations in hot paths.
+final class STFTWorkspace: @unchecked Sendable {
+    /// Split complex buffers for FFT input.
+    var realInput: [Float]
+    var imagInput: [Float]
+    /// Output buffers for FFT result.
+    var fftReal: [Float]
+    var fftImag: [Float]
+    /// Windowed frame buffer.
+    var windowedFrame: [Float]
+
+    /// Create a workspace for the given FFT size.
+    init(nFFT: Int) {
+        let halfN = nFFT / 2
+        self.realInput = [Float](repeating: 0, count: halfN)
+        self.imagInput = [Float](repeating: 0, count: halfN)
+        self.fftReal = [Float](repeating: 0, count: halfN + 1)
+        self.fftImag = [Float](repeating: 0, count: halfN + 1)
+        self.windowedFrame = [Float](repeating: 0, count: nFFT)
+    }
+
+    /// Reset all buffers to zero.
+    func reset() {
+        realInput.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
+        imagInput.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
+    }
+}
+
 /// Short-Time Fourier Transform.
 public struct STFT: Sendable {
     public let config: STFTConfig
@@ -103,6 +134,9 @@ public struct STFT: Sendable {
         let frames = frameSignal(paddedSignal)
         let nFrames = frames.count
 
+        // Create workspace once for all frames (major optimization)
+        let workspace = STFTWorkspace(nFFT: config.nFFT)
+
         // Apply window to each frame and compute FFT
         var realResult = [[Float]]()
         var imagResult = [[Float]]()
@@ -115,23 +149,24 @@ public struct STFT: Sendable {
             imagResult.append([Float](repeating: 0, count: nFrames))
         }
 
-        // Process each frame
+        // Process each frame with reusable workspace
         for (frameIdx, frame) in frames.enumerated() {
-            // Apply window
-            var windowedFrame = [Float](repeating: 0, count: config.nFFT)
+            // Apply window using workspace buffer
+            // Zero out the windowed frame buffer first
+            workspace.windowedFrame.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
 
             // Copy and window the frame (zero-pad if winLength < nFFT)
             for i in 0..<min(frame.count, config.winLength) {
-                windowedFrame[i] = frame[i] * window[i]
+                workspace.windowedFrame[i] = frame[i] * window[i]
             }
 
-            // Compute FFT
-            let (fftReal, fftImag) = computeFFT(windowedFrame)
+            // Compute FFT using workspace buffers
+            computeFFTWithWorkspace(workspace)
 
             // Store results (only positive frequencies)
             for freqIdx in 0..<config.nFreqs {
-                realResult[freqIdx][frameIdx] = fftReal[freqIdx]
-                imagResult[freqIdx][frameIdx] = fftImag[freqIdx]
+                realResult[freqIdx][frameIdx] = workspace.fftReal[freqIdx]
+                imagResult[freqIdx][frameIdx] = workspace.fftImag[freqIdx]
             }
         }
 
@@ -206,6 +241,7 @@ public struct STFT: Sendable {
     }
 
     private func frameSignal(_ signal: [Float]) -> [[Float]] {
+        guard signal.count >= config.nFFT else { return [] }
         let nFrames = 1 + (signal.count - config.nFFT) / config.hopLength
         var frames = [[Float]]()
         frames.reserveCapacity(nFrames)
@@ -226,21 +262,25 @@ public struct STFT: Sendable {
         return frames
     }
 
-    private func computeFFT(_ input: [Float]) -> (real: [Float], imag: [Float]) {
+    /// Compute FFT using pre-allocated workspace buffers.
+    ///
+    /// This method reuses workspace buffers across frames to avoid allocations.
+    /// Results are stored directly in workspace.fftReal and workspace.fftImag.
+    private func computeFFTWithWorkspace(_ workspace: STFTWorkspace) {
         let n = config.nFFT
         let log2n = vDSP_Length(log2(Double(n)))
 
-        // Prepare input in split complex format
-        var realInput = [Float](repeating: 0, count: n / 2)
-        var imagInput = [Float](repeating: 0, count: n / 2)
+        // Reset workspace buffers
+        workspace.realInput.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
+        workspace.imagInput.withUnsafeMutableBytes { memset($0.baseAddress!, 0, $0.count) }
 
         // Convert to split complex format for FFT
-        realInput.withUnsafeMutableBufferPointer { realPtr in
-            imagInput.withUnsafeMutableBufferPointer { imagPtr in
+        workspace.realInput.withUnsafeMutableBufferPointer { realPtr in
+            workspace.imagInput.withUnsafeMutableBufferPointer { imagPtr in
                 var split = DSPSplitComplex(realp: realPtr.baseAddress!, imagp: imagPtr.baseAddress!)
 
                 // Pack real data into split complex format
-                input.withUnsafeBufferPointer { inputPtr in
+                workspace.windowedFrame.withUnsafeBufferPointer { inputPtr in
                     vDSP_ctoz(
                         UnsafePointer<DSPComplex>(OpaquePointer(inputPtr.baseAddress!)),
                         2,
@@ -261,23 +301,26 @@ public struct STFT: Sendable {
         }
 
         // Unpack to full complex spectrum (positive frequencies only)
-        var fftReal = [Float](repeating: 0, count: n / 2 + 1)
-        var fftImag = [Float](repeating: 0, count: n / 2 + 1)
-
         // DC component
-        fftReal[0] = realInput[0]
-        fftImag[0] = 0
+        workspace.fftReal[0] = workspace.realInput[0]
+        workspace.fftImag[0] = 0
 
         // Positive frequencies
         for i in 1..<(n / 2) {
-            fftReal[i] = realInput[i]
-            fftImag[i] = imagInput[i]
+            workspace.fftReal[i] = workspace.realInput[i]
+            workspace.fftImag[i] = workspace.imagInput[i]
         }
 
         // Nyquist
-        fftReal[n / 2] = imagInput[0]
-        fftImag[n / 2] = 0
+        workspace.fftReal[n / 2] = workspace.imagInput[0]
+        workspace.fftImag[n / 2] = 0
+    }
 
-        return (fftReal, fftImag)
+    /// Legacy method for backward compatibility (allocates per call).
+    private func computeFFT(_ input: [Float]) -> (real: [Float], imag: [Float]) {
+        let workspace = STFTWorkspace(nFFT: config.nFFT)
+        workspace.windowedFrame = input
+        computeFFTWithWorkspace(workspace)
+        return (workspace.fftReal, workspace.fftImag)
     }
 }

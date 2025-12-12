@@ -1,0 +1,440 @@
+import Accelerate
+import Foundation
+
+/// Normalization mode for chromagram.
+public enum ChromaNorm: Sendable {
+    /// No normalization.
+    case none
+    /// L1 normalization (sum to 1).
+    case l1
+    /// L2 normalization (unit norm).
+    case l2
+    /// Max normalization (max = 1).
+    case max
+}
+
+/// Configuration for chromagram extraction.
+public struct ChromagramConfig: Sendable {
+    /// Sample rate in Hz.
+    public let sampleRate: Float
+
+    /// Hop length between frames.
+    public let hopLength: Int
+
+    /// Number of chroma bins (default: 12 for Western music).
+    public let nChroma: Int
+
+    /// Use CQT-based chromagram (true) or STFT-based (false).
+    public let useCQT: Bool
+
+    /// Normalization mode.
+    public let norm: ChromaNorm
+
+    /// Tuning offset in fractional bins.
+    public let tuning: Float
+
+    // STFT-based parameters
+    /// FFT size (for STFT-based chromagram).
+    public let nFFT: Int
+
+    /// Window type.
+    public let windowType: WindowType
+
+    // CQT-based parameters
+    /// Number of octaves (for CQT-based chromagram).
+    public let nOctaves: Int
+
+    /// Bins per octave (for CQT-based chromagram).
+    public let binsPerOctave: Int
+
+    /// Create chromagram configuration.
+    ///
+    /// - Parameters:
+    ///   - sampleRate: Sample rate in Hz (default: 22050).
+    ///   - hopLength: Hop length (default: 512).
+    ///   - nChroma: Number of chroma bins (default: 12).
+    ///   - useCQT: Use CQT-based extraction (default: true).
+    ///   - norm: Normalization mode (default: l2).
+    ///   - tuning: Tuning offset (default: 0).
+    ///   - nFFT: FFT size for STFT (default: 2048).
+    ///   - windowType: Window type (default: hann).
+    ///   - nOctaves: Octaves for CQT (default: 7).
+    ///   - binsPerOctave: Bins per octave for CQT (default: 36).
+    public init(
+        sampleRate: Float = 22050,
+        hopLength: Int = 512,
+        nChroma: Int = 12,
+        useCQT: Bool = true,
+        norm: ChromaNorm = .l2,
+        tuning: Float = 0.0,
+        nFFT: Int = 2048,
+        windowType: WindowType = .hann,
+        nOctaves: Int = 7,
+        binsPerOctave: Int = 36
+    ) {
+        self.sampleRate = sampleRate
+        self.hopLength = hopLength
+        self.nChroma = nChroma
+        self.useCQT = useCQT
+        self.norm = norm
+        self.tuning = tuning
+        self.nFFT = nFFT
+        self.windowType = windowType
+        self.nOctaves = nOctaves
+        self.binsPerOctave = binsPerOctave
+    }
+}
+
+/// Chromagram (pitch-class profile) extractor.
+///
+/// A chromagram represents the intensity of each of the 12 pitch classes
+/// (C, C#, D, ..., B) over time, regardless of octave. This makes it useful
+/// for chord recognition, key detection, and cover song identification.
+///
+/// ## Example Usage
+///
+/// ```swift
+/// let chromagram = Chromagram(config: ChromagramConfig())
+///
+/// // Extract chromagram
+/// let chroma = await chromagram.transform(audioSignal)
+/// // chroma has shape (12, nFrames)
+///
+/// // From pre-computed CQT
+/// let chromaFromCQT = chromagram.fromCQT(cqtMagnitude)
+/// ```
+public struct Chromagram: Sendable {
+    /// Configuration.
+    public let config: ChromagramConfig
+
+    /// CQT processor (for CQT-based chromagram).
+    private let cqt: CQT?
+
+    /// STFT processor (for STFT-based chromagram).
+    private let stft: STFT?
+
+    /// Chroma filterbank for STFT-based extraction.
+    private let chromaFilterbank: [[Float]]?
+
+    /// Create a chromagram extractor.
+    ///
+    /// - Parameter config: Configuration.
+    public init(config: ChromagramConfig = ChromagramConfig()) {
+        self.config = config
+
+        if config.useCQT {
+            // CQT-based chromagram
+            self.cqt = CQT(config: CQTConfig(
+                sampleRate: config.sampleRate,
+                hopLength: config.hopLength,
+                fMin: 32.70,  // C1
+                nBins: config.nOctaves * config.binsPerOctave,
+                binsPerOctave: config.binsPerOctave,
+                windowType: config.windowType,
+                filterScale: 1.0,
+                sparsity: 0.01
+            ))
+            self.stft = nil
+            self.chromaFilterbank = nil
+        } else {
+            // STFT-based chromagram
+            self.cqt = nil
+            self.stft = STFT(config: STFTConfig(
+                nFFT: config.nFFT,
+                hopLength: config.hopLength,
+                winLength: config.nFFT,
+                windowType: config.windowType,
+                center: true,
+                padMode: .reflect
+            ))
+            self.chromaFilterbank = Self.computeChromaFilterbank(
+                sampleRate: config.sampleRate,
+                nFFT: config.nFFT,
+                nChroma: config.nChroma,
+                tuning: config.tuning
+            )
+        }
+    }
+
+    /// Compute chromagram from audio signal.
+    ///
+    /// - Parameter signal: Input audio signal.
+    /// - Returns: Chromagram of shape (nChroma, nFrames).
+    public func transform(_ signal: [Float]) async -> [[Float]] {
+        if config.useCQT, let cqt = cqt {
+            let cqtMag = await cqt.magnitude(signal)
+            return fromCQT(cqtMag)
+        } else if let stft = stft {
+            let stftMag = await stft.magnitude(signal)
+            return fromSTFT(stftMag)
+        } else {
+            return []
+        }
+    }
+
+    /// Compute chromagram from pre-computed CQT magnitude.
+    ///
+    /// - Parameter cqtMagnitude: CQT magnitude of shape (nBins, nFrames).
+    /// - Returns: Chromagram of shape (nChroma, nFrames).
+    public func fromCQT(_ cqtMagnitude: [[Float]]) -> [[Float]] {
+        guard !cqtMagnitude.isEmpty && !cqtMagnitude[0].isEmpty else { return [] }
+
+        let nBins = cqtMagnitude.count
+        let nFrames = cqtMagnitude[0].count
+        let binsPerChroma = nBins / config.nChroma
+
+        // Initialize chroma
+        var chroma = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: config.nChroma)
+
+        // Fold CQT bins into chroma
+        for bin in 0..<nBins {
+            let chromaIndex = bin % config.nChroma
+
+            for frame in 0..<nFrames {
+                chroma[chromaIndex][frame] += cqtMagnitude[bin][frame]
+            }
+        }
+
+        // Normalize
+        return normalizeChroma(chroma)
+    }
+
+    /// Compute chromagram from pre-computed STFT magnitude.
+    ///
+    /// - Parameter stftMagnitude: STFT magnitude of shape (nFreqs, nFrames).
+    /// - Returns: Chromagram of shape (nChroma, nFrames).
+    public func fromSTFT(_ stftMagnitude: [[Float]]) -> [[Float]] {
+        guard !stftMagnitude.isEmpty && !stftMagnitude[0].isEmpty else { return [] }
+        guard let filterbank = chromaFilterbank else { return [] }
+
+        let nFreqs = stftMagnitude.count
+        let nFrames = stftMagnitude[0].count
+
+        // Initialize chroma
+        var chroma = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: config.nChroma)
+
+        // Apply filterbank: chroma = filterbank @ magnitude
+        for chromaIdx in 0..<config.nChroma {
+            for frame in 0..<nFrames {
+                var sum: Float = 0
+                for freq in 0..<min(nFreqs, filterbank[chromaIdx].count) {
+                    sum += filterbank[chromaIdx][freq] * stftMagnitude[freq][frame]
+                }
+                chroma[chromaIdx][frame] = sum
+            }
+        }
+
+        // Normalize
+        return normalizeChroma(chroma)
+    }
+
+    // MARK: - Private Implementation
+
+    private static func computeChromaFilterbank(
+        sampleRate: Float,
+        nFFT: Int,
+        nChroma: Int,
+        tuning: Float
+    ) -> [[Float]] {
+        let nFreqs = nFFT / 2 + 1
+
+        // Frequency for each FFT bin
+        var frequencies = [Float](repeating: 0, count: nFreqs)
+        let binWidth = sampleRate / Float(nFFT)
+        for i in 0..<nFreqs {
+            frequencies[i] = Float(i) * binWidth
+        }
+
+        // Initialize filterbank
+        var filterbank = [[Float]](repeating: [Float](repeating: 0, count: nFreqs), count: nChroma)
+
+        // Map each frequency bin to chroma
+        let fRef: Float = 261.63  // C4 reference frequency
+
+        for freq in 1..<nFreqs {  // Skip DC
+            let f = frequencies[freq]
+
+            // Convert frequency to chroma bin (with tuning offset)
+            let chromaFloat = Float(nChroma) * log2(f / fRef) + tuning
+            let chromaIdx = Int(chromaFloat.truncatingRemainder(dividingBy: Float(nChroma)))
+
+            let validIdx = chromaIdx >= 0 ? chromaIdx : chromaIdx + nChroma
+
+            if validIdx >= 0 && validIdx < nChroma {
+                // Simple assignment (could use interpolation for smoother results)
+                filterbank[validIdx][freq] = 1.0
+            }
+        }
+
+        return filterbank
+    }
+
+    private func normalizeChroma(_ chroma: [[Float]]) -> [[Float]] {
+        guard !chroma.isEmpty && !chroma[0].isEmpty else { return chroma }
+
+        let nFrames = chroma[0].count
+        var normalized = chroma
+
+        switch config.norm {
+        case .none:
+            return chroma
+
+        case .l1:
+            // Normalize each frame to sum to 1
+            for frame in 0..<nFrames {
+                var sum: Float = 0
+                for chromaIdx in 0..<config.nChroma {
+                    sum += normalized[chromaIdx][frame]
+                }
+                if sum > 0 {
+                    for chromaIdx in 0..<config.nChroma {
+                        normalized[chromaIdx][frame] /= sum
+                    }
+                }
+            }
+
+        case .l2:
+            // Normalize each frame to unit L2 norm
+            for frame in 0..<nFrames {
+                var sumSquares: Float = 0
+                for chromaIdx in 0..<config.nChroma {
+                    sumSquares += normalized[chromaIdx][frame] * normalized[chromaIdx][frame]
+                }
+                let norm = sqrt(sumSquares)
+                if norm > 0 {
+                    for chromaIdx in 0..<config.nChroma {
+                        normalized[chromaIdx][frame] /= norm
+                    }
+                }
+            }
+
+        case .max:
+            // Normalize each frame so max = 1
+            for frame in 0..<nFrames {
+                var maxVal: Float = 0
+                for chromaIdx in 0..<config.nChroma {
+                    maxVal = max(maxVal, normalized[chromaIdx][frame])
+                }
+                if maxVal > 0 {
+                    for chromaIdx in 0..<config.nChroma {
+                        normalized[chromaIdx][frame] /= maxVal
+                    }
+                }
+            }
+        }
+
+        return normalized
+    }
+}
+
+// MARK: - Presets
+
+extension Chromagram {
+    /// Configuration for music analysis.
+    public static var musicAnalysis: Chromagram {
+        Chromagram(config: ChromagramConfig(
+            sampleRate: 22050,
+            hopLength: 512,
+            nChroma: 12,
+            useCQT: true,
+            norm: .l2,
+            tuning: 0.0,
+            nOctaves: 7,
+            binsPerOctave: 36
+        ))
+    }
+
+    /// Configuration for chord recognition.
+    public static var chordRecognition: Chromagram {
+        Chromagram(config: ChromagramConfig(
+            sampleRate: 22050,
+            hopLength: 2048,  // Larger hop for chord-level features
+            nChroma: 12,
+            useCQT: true,
+            norm: .l2,
+            tuning: 0.0,
+            nOctaves: 6,
+            binsPerOctave: 36
+        ))
+    }
+
+    /// STFT-based chromagram (faster but less accurate).
+    public static var stftBased: Chromagram {
+        Chromagram(config: ChromagramConfig(
+            sampleRate: 22050,
+            hopLength: 512,
+            nChroma: 12,
+            useCQT: false,
+            norm: .l2,
+            tuning: 0.0,
+            nFFT: 4096,
+            windowType: .hann
+        ))
+    }
+}
+
+// MARK: - Utility Methods
+
+extension Chromagram {
+    /// Pitch class names.
+    public static let pitchClassNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+    /// Get the name of a chroma bin.
+    ///
+    /// - Parameter bin: Bin index (0-11).
+    /// - Returns: Pitch class name.
+    public static func binName(_ bin: Int) -> String {
+        guard bin >= 0 && bin < 12 else { return "?" }
+        return pitchClassNames[bin]
+    }
+
+    /// Find dominant pitch class in a frame.
+    ///
+    /// - Parameter frame: Chroma frame (12 values).
+    /// - Returns: Index of dominant pitch class.
+    public static func dominantPitchClass(_ frame: [Float]) -> Int {
+        guard frame.count == 12 else { return 0 }
+
+        var maxIdx = 0
+        var maxVal: Float = frame[0]
+
+        for i in 1..<12 {
+            if frame[i] > maxVal {
+                maxVal = frame[i]
+                maxIdx = i
+            }
+        }
+
+        return maxIdx
+    }
+
+    /// Compute chroma correlation between two frames.
+    ///
+    /// - Parameters:
+    ///   - frame1: First chroma frame.
+    ///   - frame2: Second chroma frame.
+    /// - Returns: Correlation coefficient (-1 to 1).
+    public static func correlation(_ frame1: [Float], _ frame2: [Float]) -> Float {
+        guard frame1.count == 12 && frame2.count == 12 else { return 0 }
+
+        // Compute means
+        let mean1 = frame1.reduce(0, +) / 12.0
+        let mean2 = frame2.reduce(0, +) / 12.0
+
+        // Compute correlation
+        var numerator: Float = 0
+        var denom1: Float = 0
+        var denom2: Float = 0
+
+        for i in 0..<12 {
+            let d1 = frame1[i] - mean1
+            let d2 = frame2[i] - mean2
+            numerator += d1 * d2
+            denom1 += d1 * d1
+            denom2 += d2 * d2
+        }
+
+        let denominator = sqrt(denom1 * denom2)
+        return denominator > 0 ? numerator / denominator : 0
+    }
+}
