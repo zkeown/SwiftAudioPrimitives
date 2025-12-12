@@ -1,4 +1,6 @@
+# ===================
 # Xcode
+# ===================
 *.xcodeproj/
 *.xcworkspace/
 xcuserdata/
@@ -11,45 +13,190 @@ build/
 *.perspectivev3
 *.xccheckout
 *.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
 
+# Xcode Scheme
+!*.xcscheme
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# ===================
 # Swift Package Manager
+# ===================
 .build/
 .swiftpm/
 Package.resolved
+Packages/
+*.xcframework
 
+# ===================
 # CocoaPods
+# ===================
 Pods/
+*.xcworkspace
+!*.xcworkspace/contents.xcworkspacedata
+!*.xcworkspace/xcshareddata/
 
+# ===================
 # Carthage
+# ===================
 Carthage/Build/
+Carthage/Checkouts/
 
+# ===================
 # fastlane
+# ===================
 fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
 
+# ===================
 # Code Injection
+# ===================
 iOSInjectionProject/
 
+# ===================
 # macOS
+# ===================
 .DS_Store
+.DS_Store?
 .AppleDouble
 .LSOverride
 ._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
 
-# Thumbnails
+# ===================
+# Windows
+# ===================
 Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
 
-# IDE
+# ===================
+# Linux
+# ===================
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ===================
+# IDE / Editors
+# ===================
+# Vim
 *.swp
 *.swo
 *~
+.*.swp
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# JetBrains (AppCode, etc.)
 .idea/
 *.iml
-.vscode/
+*.ipr
+*.iws
+out/
 
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# TextMate
+*.tmproj
+*.tmproject
+tmtags
+
+# ===================
 # Archives
+# ===================
 *.xcarchive
-*.ipa
-*.dSYM.zip
+*.zip
+*.tar.gz
+*.tgz
+
+# ===================
+# Metal
+# ===================
+# Compiled Metal libraries (regenerated during build)
+*.metallib
+
+# ===================
+# Generated Files
+# ===================
+*.generated.swift
+GeneratedSources/
+
+# ===================
+# Testing / Coverage
+# ===================
+*.xcresult
+coverage/
+*.profraw
+*.profdata
+lcov.info
+.coverage
+
+# ===================
+# Debug / Logs
+# ===================
+*.log
+*.crash
+crash_reports/
+Logs/
+
+# ===================
+# Credentials / Secrets
+# ===================
+*.pem
+*.p12
+*.key
+*.cer
+*.mobileprovision
+*.provisionprofile
+Secrets/
+credentials.json
+secrets.json
+
+# ===================
+# Environment
+# ===================
+.env
+.env.local
+.env.*.local
+*.xcconfig.local
+
+# ===================
+# Documentation (generated)
+# ===================
+docs/generated/
+.docbuild/
+
+# ===================
+# Misc
+# ===================
+*.orig
+*.rej
+*.bak
+*.tmp
+*.temp
+.cache/
+tmp/
+temp/

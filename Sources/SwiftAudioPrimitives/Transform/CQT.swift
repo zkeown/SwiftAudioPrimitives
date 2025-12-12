@@ -143,29 +143,43 @@ public struct CQT: Sendable {
         var realOutput = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: config.nBins)
         var imagOutput = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: config.nBins)
 
-        // Process each bin
-        for binIdx in 0..<config.nBins {
-            let kernel = kernels[binIdx]
+        // Process each bin using vectorized dot products
+        paddedSignal.withUnsafeBufferPointer { signalPtr in
+            for binIdx in 0..<config.nBins {
+                let kernel = kernels[binIdx]
 
-            for frameIdx in 0..<nFrames {
-                let center = frameIdx * config.hopLength + padLength / 2
-                let start = center - kernel.filterLength / 2
-                let end = start + kernel.filterLength
+                kernel.realPart.withUnsafeBufferPointer { realKernelPtr in
+                    kernel.imagPart.withUnsafeBufferPointer { imagKernelPtr in
+                        for frameIdx in 0..<nFrames {
+                            let center = frameIdx * config.hopLength + padLength / 2
+                            let start = center - kernel.filterLength / 2
+                            let end = start + kernel.filterLength
 
-                guard start >= 0 && end <= paddedSignal.count else { continue }
+                            guard start >= 0 && end <= paddedSignal.count else { continue }
 
-                // Convolve signal with kernel
-                var realSum: Float = 0
-                var imagSum: Float = 0
+                            // Use vDSP_dotpr for vectorized convolution
+                            var realSum: Float = 0
+                            var imagSum: Float = 0
 
-                for i in 0..<kernel.filterLength {
-                    let signalIdx = start + i
-                    realSum += paddedSignal[signalIdx] * kernel.realPart[i]
-                    imagSum += paddedSignal[signalIdx] * kernel.imagPart[i]
+                            vDSP_dotpr(
+                                signalPtr.baseAddress! + start, 1,
+                                realKernelPtr.baseAddress!, 1,
+                                &realSum,
+                                vDSP_Length(kernel.filterLength)
+                            )
+
+                            vDSP_dotpr(
+                                signalPtr.baseAddress! + start, 1,
+                                imagKernelPtr.baseAddress!, 1,
+                                &imagSum,
+                                vDSP_Length(kernel.filterLength)
+                            )
+
+                            realOutput[binIdx][frameIdx] = realSum
+                            imagOutput[binIdx][frameIdx] = imagSum
+                        }
+                    }
                 }
-
-                realOutput[binIdx][frameIdx] = realSum
-                imagOutput[binIdx][frameIdx] = imagSum
             }
         }
 
@@ -212,17 +226,40 @@ public struct CQT: Sendable {
             // Generate window
             let window = Windows.generate(config.windowType, length: clampedLength, periodic: true)
 
-            // Generate complex exponential kernel
+            // Generate complex exponential kernel using vDSP
             var realPart = [Float](repeating: 0, count: clampedLength)
             var imagPart = [Float](repeating: 0, count: clampedLength)
 
             let normFactor = 1.0 / Float(clampedLength)
+            let phaseIncrement = 2.0 * Float.pi * centerFreq / config.sampleRate
 
-            for n in 0..<clampedLength {
-                let phase = 2.0 * Float.pi * centerFreq * Float(n) / config.sampleRate
-                realPart[n] = window[n] * cos(phase) * normFactor
-                imagPart[n] = window[n] * -sin(phase) * normFactor  // Negative for analysis
-            }
+            // Generate ramp for phase values: 0, phaseIncrement, 2*phaseIncrement, ...
+            var phases = [Float](repeating: 0, count: clampedLength)
+            var zero: Float = 0
+            var increment = phaseIncrement
+            vDSP_vramp(&zero, &increment, &phases, 1, vDSP_Length(clampedLength))
+
+            // Compute cos and sin using vForce (vectorized)
+            var cosValues = [Float](repeating: 0, count: clampedLength)
+            var sinValues = [Float](repeating: 0, count: clampedLength)
+            var count = Int32(clampedLength)
+            vvcosf(&cosValues, phases, &count)
+            vvsinf(&sinValues, phases, &count)
+
+            // Multiply by window and normalization factor
+            // realPart = window * cos * normFactor
+            // imagPart = window * (-sin) * normFactor
+            var normFactorVar = normFactor
+            var negNormFactor = -normFactor
+
+            // realPart = cosValues * window
+            vDSP_vmul(cosValues, 1, window, 1, &realPart, 1, vDSP_Length(clampedLength))
+            // realPart *= normFactor
+            vDSP_vsmul(realPart, 1, &normFactorVar, &realPart, 1, vDSP_Length(clampedLength))
+
+            // imagPart = sinValues * window * (-normFactor)
+            vDSP_vmul(sinValues, 1, window, 1, &imagPart, 1, vDSP_Length(clampedLength))
+            vDSP_vsmul(imagPart, 1, &negNormFactor, &imagPart, 1, vDSP_Length(clampedLength))
 
             kernels.append(CQTKernel(
                 centerFreq: centerFreq,

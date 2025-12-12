@@ -227,10 +227,7 @@ public struct Resample: Sendable {
 
     // MARK: - Polyphase Resampling
 
-    /// Perform polyphase resampling using optimized polyphase decomposition.
-    ///
-    /// This implementation pre-decomposes the filter into polyphase components
-    /// and uses vDSP_dotpr for vectorized convolution.
+    /// Perform polyphase resampling using fractional delay approach.
     ///
     /// - Parameters:
     ///   - signal: Input signal.
@@ -249,135 +246,34 @@ public struct Resample: Sendable {
 
         guard outputLength > 0 && inputLength > 0 else { return [] }
 
-        // Special case: simple downsampling (upFactor == 1)
-        // Use vDSP_desamp for maximum efficiency
-        if upFactor == 1 && downFactor > 1 {
-            return downsampleWithDesamp(signal: signal, factor: downFactor, filter: filter)
-        }
-
-        // General case: use polyphase decomposition
-        // Decompose filter into L polyphase branches
-        let polyphaseFilters = decomposePolyphase(filter: filter, phases: upFactor)
-        let polyphaseLengths = polyphaseFilters.map { $0.count }
-        let maxPolyphaseLen = polyphaseLengths.max() ?? 0
-
         var output = [Float](repeating: 0, count: outputLength)
-        let filterHalf = filter.count / 2
+        let filterLen = filter.count
+        let filterHalf = filterLen / 2
 
-        // Process each output sample
-        signal.withUnsafeBufferPointer { signalPtr in
-            for n in 0..<outputLength {
-                // Position in upsampled domain
-                let m = n * downFactor
+        // For each output sample
+        for n in 0..<outputLength {
+            // Position in the upsampled (conceptual) signal
+            let m = n * downFactor
 
-                // Determine which polyphase filter to use
-                let phase = m % upFactor
-                let polyphaseFilter = polyphaseFilters[phase]
-                let polyphaseLen = polyphaseFilter.count
+            var sum: Float = 0.0
 
-                guard polyphaseLen > 0 else { continue }
+            // Convolution: output[n] = sum_k filter[k] * upsampled[m - k + filterHalf]
+            // The upsampled signal is: upsampled[j] = signal[j/L] if j%L==0, else 0
+            for k in 0..<filterLen {
+                // Position in upsampled domain relative to filter center
+                let j = m - k + filterHalf
 
-                // Calculate signal index range
-                // The polyphase filter samples at indices: phase, phase+L, phase+2L, ...
-                // Which corresponds to signal indices: phase/L, (phase+L)/L, (phase+2L)/L, ...
-                // = 0, 1, 2, ... (when phase is factored in)
-
-                let baseSignalIdx = (m + filterHalf) / upFactor - (polyphaseLen - 1)
-
-                // Compute dot product using vDSP where possible
-                var sum: Float = 0.0
-
-                // Determine valid range
-                let startOffset = max(0, -baseSignalIdx)
-                let endOffset = min(polyphaseLen, inputLength - baseSignalIdx)
-
-                if startOffset < endOffset {
-                    let validLen = endOffset - startOffset
-                    let signalStartIdx = baseSignalIdx + startOffset
-
-                    if signalStartIdx >= 0 && signalStartIdx + validLen <= inputLength {
-                        // Use vDSP_dotpr for vectorized dot product
-                        polyphaseFilter.withUnsafeBufferPointer { filterPtr in
-                            vDSP_dotpr(
-                                signalPtr.baseAddress! + signalStartIdx, 1,
-                                filterPtr.baseAddress! + startOffset, 1,
-                                &sum,
-                                vDSP_Length(validLen)
-                            )
-                        }
-                    } else {
-                        // Fallback for edge cases
-                        for k in startOffset..<endOffset {
-                            let sigIdx = baseSignalIdx + k
-                            if sigIdx >= 0 && sigIdx < inputLength {
-                                sum += signalPtr[sigIdx] * polyphaseFilter[k]
-                            }
-                        }
+                // upsampled[j] is non-zero only when j % L == 0
+                if j >= 0 && j % upFactor == 0 {
+                    let signalIdx = j / upFactor
+                    if signalIdx >= 0 && signalIdx < inputLength {
+                        sum += signal[signalIdx] * filter[k]
                     }
                 }
-
-                output[n] = sum * Float(upFactor)
             }
-        }
 
-        return output
-    }
-
-    /// Decompose a filter into polyphase components.
-    ///
-    /// Given a filter h[n] of length N and upsampling factor L,
-    /// creates L polyphase filters where polyphase[p][k] = h[p + k*L]
-    ///
-    /// - Parameters:
-    ///   - filter: Original filter coefficients.
-    ///   - phases: Number of polyphase branches (upsampling factor L).
-    /// - Returns: Array of polyphase filter coefficients.
-    private static func decomposePolyphase(filter: [Float], phases: Int) -> [[Float]] {
-        var polyphase = [[Float]](repeating: [], count: phases)
-
-        for p in 0..<phases {
-            var branch = [Float]()
-            var idx = p
-            while idx < filter.count {
-                branch.append(filter[idx])
-                idx += phases
-            }
-            polyphase[p] = branch
-        }
-
-        return polyphase
-    }
-
-    /// Optimized downsampling using vDSP_desamp.
-    ///
-    /// - Parameters:
-    ///   - signal: Input signal.
-    ///   - factor: Downsampling factor.
-    ///   - filter: FIR filter coefficients.
-    /// - Returns: Downsampled signal.
-    private static func downsampleWithDesamp(
-        signal: [Float],
-        factor: Int,
-        filter: [Float]
-    ) -> [Float] {
-        let outputLength = signal.count / factor
-        guard outputLength > 0 else { return [] }
-
-        var output = [Float](repeating: 0, count: outputLength)
-
-        signal.withUnsafeBufferPointer { sigPtr in
-            filter.withUnsafeBufferPointer { filtPtr in
-                output.withUnsafeMutableBufferPointer { outPtr in
-                    vDSP_desamp(
-                        sigPtr.baseAddress!,
-                        vDSP_Stride(factor),
-                        filtPtr.baseAddress!,
-                        outPtr.baseAddress!,
-                        vDSP_Length(outputLength),
-                        vDSP_Length(filter.count)
-                    )
-                }
-            }
+            // Scale by upFactor to compensate for zero-insertion
+            output[n] = sum * Float(upFactor)
         }
 
         return output

@@ -154,21 +154,19 @@ public actor MetalEngine {
 
         // Load shader library - try multiple approaches
         do {
-            // 1. Try pre-compiled metallib (fastest)
+            // 1. Try pre-compiled metallib from build plugin output
             if let libraryURL = Bundle.module.url(forResource: "default", withExtension: "metallib") {
                 self.library = try device.makeLibrary(URL: libraryURL)
             }
-            // 2. Try default library from bundle
+            // 2. Try default library from bundle (Xcode projects)
             else if let lib = try? device.makeDefaultLibrary(bundle: Bundle.module) {
                 self.library = lib
             }
-            // 3. Compile from source at runtime
-            else if let sourceURL = Bundle.module.url(forResource: "Shaders", withExtension: "metal") {
-                let source = try String(contentsOf: sourceURL, encoding: .utf8)
-                self.library = try device.makeLibrary(source: source, options: nil)
-            }
+            // 3. FAIL FAST - don't attempt runtime compilation (it hangs)
             else {
-                throw MetalEngineError.libraryLoadFailed("No Metal shader source found in bundle")
+                throw MetalEngineError.libraryLoadFailed(
+                    "No pre-compiled Metal library found. Ensure MetalCompilerPlugin ran during build."
+                )
             }
         } catch let error as MetalEngineError {
             throw error
