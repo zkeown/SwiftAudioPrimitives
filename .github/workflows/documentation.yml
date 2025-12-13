@@ -30,8 +30,10 @@ jobs:
 
       - name: Build Documentation
         run: |
-          # Build documentation for all targets
-          swift package generate-documentation \
+          # Build documentation with sandbox disabled to allow Metal shader compilation
+          swift package \
+            --disable-sandbox \
+            generate-documentation \
             --output-path ./docs \
             --transform-for-static-hosting \
             --hosting-base-path SwiftRosa
