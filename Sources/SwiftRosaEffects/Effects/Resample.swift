@@ -519,7 +519,7 @@ public struct Resample: Sendable {
         var output = [Float](repeating: 0, count: outputLength)
 
         // For rational resampling, use direct computation
-        // Optimized with unsafe pointers and minimal branching
+        // Optimized with vDSP_dotpr for vectorized dot products
         signal.withUnsafeBufferPointer { signalPtr in
             output.withUnsafeMutableBufferPointer { outPtr in
                 for n in 0..<outputLength {
@@ -537,10 +537,18 @@ public struct Resample: Sendable {
                         let minValid = max(0, baseSignalIdx - inputLength + 1)
                         let maxValid = min(tapsCount, baseSignalIdx + 1)
 
-                        if maxValid > minValid {
-                            for tapIdx in minValid..<maxValid {
-                                sum += signalPtr[baseSignalIdx - tapIdx] * tapsPtr[tapIdx]
-                            }
+                        let validLen = maxValid - minValid
+                        if validLen > 0 {
+                            // Signal is accessed at indices: baseSignalIdx-minValid, baseSignalIdx-minValid-1, ...
+                            // Taps are accessed at indices: minValid, minValid+1, ...
+                            // Use vDSP_dotpr with negative stride for signal to handle reversal
+                            let signalStart = baseSignalIdx - minValid
+                            vDSP_dotpr(
+                                signalPtr.baseAddress! + (signalStart - validLen + 1), 1,  // Signal ascending
+                                tapsPtr.baseAddress! + (maxValid - 1), -1,  // Taps reversed
+                                &sum,
+                                vDSP_Length(validLen)
+                            )
                         }
                     }
 

@@ -174,10 +174,10 @@ public struct MelSpectrogram: Sendable {
         return applyFilterbankCPU(powerSpec)
     }
 
-    /// Apply mel filterbank using sparse representation for efficient computation.
+    /// Apply mel filterbank using the most efficient method based on data size.
     ///
-    /// Since mel filters are triangular with ~95% zeros, we only compute
-    /// over the non-zero range of each filter, reducing operations significantly.
+    /// Uses sparse computation for small/medium data (lower overhead) and
+    /// dense vDSP_mmul for large data (better vectorization).
     private func applyFilterbankCPU(_ powerSpec: [[Float]]) -> [[Float]] {
         guard !powerSpec.isEmpty, let firstRow = powerSpec.first, !firstRow.isEmpty else {
             return []
@@ -185,13 +185,76 @@ public struct MelSpectrogram: Sendable {
 
         let nFrames = firstRow.count
         let specNFreqs = powerSpec.count
+        let nMels = filters.count
+
+        // For larger data, dense matrix multiply is more efficient due to better vectorization
+        // Threshold: ~50K elements (128 mels * 430 frames ≈ 55K for 10s @ 22050 Hz)
+        let totalElements = nMels * nFrames
+        if totalElements > 30000 {
+            return applyFilterbankDense(powerSpec)
+        }
+
+        // For smaller data, use sparse representation
+        return applyFilterbankSparse(powerSpec)
+    }
+
+    /// Dense matrix multiplication using vDSP_mmul
+    private func applyFilterbankDense(_ powerSpec: [[Float]]) -> [[Float]] {
+        let nFrames = powerSpec[0].count
+        let specNFreqs = powerSpec.count
+        let nMels = filters.count
+
+        // Flatten power spectrogram to row-major: (nFreqs × nFrames)
+        var flatPower = [Float](repeating: 0, count: specNFreqs * nFrames)
+        flatPower.withUnsafeMutableBufferPointer { flatPtr in
+            for f in 0..<specNFreqs {
+                let row = powerSpec[f]
+                let copyLen = min(nFrames, row.count)
+                row.withUnsafeBufferPointer { rowPtr in
+                    memcpy(flatPtr.baseAddress! + f * nFrames, rowPtr.baseAddress!, copyLen * MemoryLayout<Float>.size)
+                }
+            }
+        }
+
+        // Output: (nMels × nFrames) row-major
+        var flatResult = [Float](repeating: 0, count: nMels * nFrames)
+
+        // Matrix multiply using pre-flattened filterbank
+        flatFilters.withUnsafeBufferPointer { filterPtr in
+            flatPower.withUnsafeBufferPointer { powerPtr in
+                flatResult.withUnsafeMutableBufferPointer { resultPtr in
+                    vDSP_mmul(
+                        filterPtr.baseAddress!, 1,
+                        powerPtr.baseAddress!, 1,
+                        resultPtr.baseAddress!, 1,
+                        vDSP_Length(nMels),
+                        vDSP_Length(nFrames),
+                        vDSP_Length(nFreqs)
+                    )
+                }
+            }
+        }
+
+        // Reshape to [[Float]]
+        var melSpec = [[Float]]()
+        melSpec.reserveCapacity(nMels)
+        for m in 0..<nMels {
+            let start = m * nFrames
+            melSpec.append(Array(flatResult[start..<(start + nFrames)]))
+        }
+
+        return melSpec
+    }
+
+    /// Sparse filterbank application for smaller data sizes
+    private func applyFilterbankSparse(_ powerSpec: [[Float]]) -> [[Float]] {
+        let nFrames = powerSpec[0].count
+        let specNFreqs = powerSpec.count
         let nMels = sparseFilters.nMels
 
-        // Output: (nMels × nFrames)
         var melSpec = [[Float]]()
         melSpec.reserveCapacity(nMels)
 
-        // Process each mel band using sparse filter
         for m in 0..<nMels {
             var output = [Float](repeating: 0, count: nFrames)
 
@@ -199,7 +262,6 @@ public struct MelSpectrogram: Sendable {
             let freqEnd = sparseFilters.endIndices[m]
             let filterOffset = sparseFilters.offsets[m]
 
-            // Clamp to actual spectrogram size
             let clampedStart = min(freqStart, specNFreqs)
             let clampedEnd = min(freqEnd, specNFreqs)
 
@@ -208,22 +270,15 @@ public struct MelSpectrogram: Sendable {
                 continue
             }
 
-            // Compute weighted sum over non-zero filter range
             sparseFilters.values.withUnsafeBufferPointer { filterValuesPtr in
                 output.withUnsafeMutableBufferPointer { outputPtr in
-                    // For each frequency bin in the sparse filter range
                     for k in clampedStart..<clampedEnd {
                         let filterIdx = filterOffset + (k - freqStart)
-
-                        // Safety bounds check
                         guard filterIdx >= 0 && filterIdx < sparseFilters.values.count else { continue }
-                        guard k < specNFreqs else { continue }
 
                         let filterVal = filterValuesPtr[filterIdx]
 
-                        // Add weighted contribution: output += filterVal * powerSpec[k]
                         powerSpec[k].withUnsafeBufferPointer { specPtr in
-                            // vDSP_vsma: D = A * B + C (scalar multiply-add)
                             var scale = filterVal
                             vDSP_vsma(
                                 specPtr.baseAddress!, 1,
