@@ -998,4 +998,777 @@ extension MetalEngine {
 
         return elementCount >= threshold
     }
+
+    // MARK: - NMF Operations
+
+    /// Perform NMF matrix multiplication: C = A @ B
+    ///
+    /// - Parameters:
+    ///   - A: Matrix of shape (M, K), flattened row-major.
+    ///   - B: Matrix of shape (K, N), flattened row-major.
+    ///   - M: Number of rows in A.
+    ///   - K: Inner dimension.
+    ///   - N: Number of columns in B.
+    /// - Returns: Result matrix C of shape (M, N), flattened row-major.
+    public func nmfMatrixMultiply(
+        A: [Float],
+        B: [Float],
+        M: Int,
+        K: Int,
+        N: Int
+    ) async throws -> [Float] {
+        let aBytes = A.count * MemoryLayout<Float>.size
+        let bBytes = B.count * MemoryLayout<Float>.size
+        let cBytes = M * N * MemoryLayout<Float>.size
+
+        guard let aBuffer = bufferPool.acquire(minBytes: aBytes),
+              let bBuffer = bufferPool.acquire(minBytes: bBytes),
+              let cBuffer = bufferPool.acquire(minBytes: cBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer {
+            bufferPool.release(aBuffer)
+            bufferPool.release(bBuffer)
+            bufferPool.release(cBuffer)
+        }
+
+        memcpy(aBuffer.contents(), A, aBytes)
+        memcpy(bBuffer.contents(), B, bBytes)
+
+        var mVar = UInt32(M)
+        var kVar = UInt32(K)
+        var nVar = UInt32(N)
+
+        let pipeline = try getPipeline(for: "nmfMatrixMultiply")
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalEngineError.commandBufferFailed
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(aBuffer, offset: 0, index: 0)
+        encoder.setBuffer(bBuffer, offset: 0, index: 1)
+        encoder.setBuffer(cBuffer, offset: 0, index: 2)
+        encoder.setBytes(&mVar, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&kVar, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&nVar, length: MemoryLayout<UInt32>.size, index: 5)
+
+        let threadsPerGroup = MTLSize(width: 16, height: 16, depth: 1)
+        let threadGroups = MTLSize(
+            width: (N + threadsPerGroup.width - 1) / threadsPerGroup.width,
+            height: (M + threadsPerGroup.height - 1) / threadsPerGroup.height,
+            depth: 1
+        )
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let cPtr = cBuffer.contents().assumingMemoryBound(to: Float.self)
+        return Array(UnsafeBufferPointer(start: cPtr, count: M * N))
+    }
+
+    /// Perform NMF multiplicative update for W matrix on GPU.
+    ///
+    /// W_new = W * (V @ H^T) / (W @ H @ H^T + eps)
+    ///
+    /// - Parameters:
+    ///   - W: Current W matrix (M × K), flattened row-major.
+    ///   - V: Input matrix (M × N), flattened row-major.
+    ///   - H: Current H matrix (K × N), flattened row-major.
+    ///   - WH: Pre-computed W @ H (M × N), flattened row-major.
+    ///   - M: Number of rows in V/W.
+    ///   - N: Number of columns in V/H.
+    ///   - K: Number of components.
+    ///   - epsilon: Small constant for numerical stability.
+    /// - Returns: Updated W matrix.
+    public func nmfUpdateW(
+        W: [Float],
+        V: [Float],
+        H: [Float],
+        WH: [Float],
+        M: Int,
+        N: Int,
+        K: Int,
+        epsilon: Float
+    ) async throws -> [Float] {
+        let wBytes = W.count * MemoryLayout<Float>.size
+        let vBytes = V.count * MemoryLayout<Float>.size
+        let hBytes = H.count * MemoryLayout<Float>.size
+        let whBytes = WH.count * MemoryLayout<Float>.size
+
+        guard let wBuffer = bufferPool.acquire(minBytes: wBytes),
+              let vBuffer = bufferPool.acquire(minBytes: vBytes),
+              let hBuffer = bufferPool.acquire(minBytes: hBytes),
+              let whBuffer = bufferPool.acquire(minBytes: whBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer {
+            bufferPool.release(wBuffer)
+            bufferPool.release(vBuffer)
+            bufferPool.release(hBuffer)
+            bufferPool.release(whBuffer)
+        }
+
+        memcpy(wBuffer.contents(), W, wBytes)
+        memcpy(vBuffer.contents(), V, vBytes)
+        memcpy(hBuffer.contents(), H, hBytes)
+        memcpy(whBuffer.contents(), WH, whBytes)
+
+        var mVar = UInt32(M)
+        var nVar = UInt32(N)
+        var kVar = UInt32(K)
+        var epsVar = epsilon
+
+        let pipeline = try getPipeline(for: "nmfUpdateW")
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalEngineError.commandBufferFailed
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(wBuffer, offset: 0, index: 0)
+        encoder.setBuffer(vBuffer, offset: 0, index: 1)
+        encoder.setBuffer(hBuffer, offset: 0, index: 2)
+        encoder.setBuffer(whBuffer, offset: 0, index: 3)
+        encoder.setBytes(&mVar, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&nVar, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&kVar, length: MemoryLayout<UInt32>.size, index: 6)
+        encoder.setBytes(&epsVar, length: MemoryLayout<Float>.size, index: 7)
+
+        let threadsPerGroup = MTLSize(width: 16, height: 16, depth: 1)
+        let threadGroups = MTLSize(
+            width: (K + threadsPerGroup.width - 1) / threadsPerGroup.width,
+            height: (M + threadsPerGroup.height - 1) / threadsPerGroup.height,
+            depth: 1
+        )
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let wPtr = wBuffer.contents().assumingMemoryBound(to: Float.self)
+        return Array(UnsafeBufferPointer(start: wPtr, count: M * K))
+    }
+
+    /// Perform NMF multiplicative update for H matrix on GPU.
+    ///
+    /// H_new = H * (W^T @ V) / (W^T @ W @ H + eps)
+    ///
+    /// - Parameters:
+    ///   - W: Current W matrix (M × K), flattened row-major.
+    ///   - V: Input matrix (M × N), flattened row-major.
+    ///   - H: Current H matrix (K × N), flattened row-major.
+    ///   - WH: Pre-computed W @ H (M × N), flattened row-major.
+    ///   - M: Number of rows in V/W.
+    ///   - N: Number of columns in V/H.
+    ///   - K: Number of components.
+    ///   - epsilon: Small constant for numerical stability.
+    /// - Returns: Updated H matrix.
+    public func nmfUpdateH(
+        W: [Float],
+        V: [Float],
+        H: [Float],
+        WH: [Float],
+        M: Int,
+        N: Int,
+        K: Int,
+        epsilon: Float
+    ) async throws -> [Float] {
+        let wBytes = W.count * MemoryLayout<Float>.size
+        let vBytes = V.count * MemoryLayout<Float>.size
+        let hBytes = H.count * MemoryLayout<Float>.size
+        let whBytes = WH.count * MemoryLayout<Float>.size
+
+        guard let wBuffer = bufferPool.acquire(minBytes: wBytes),
+              let vBuffer = bufferPool.acquire(minBytes: vBytes),
+              let hBuffer = bufferPool.acquire(minBytes: hBytes),
+              let whBuffer = bufferPool.acquire(minBytes: whBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer {
+            bufferPool.release(wBuffer)
+            bufferPool.release(vBuffer)
+            bufferPool.release(hBuffer)
+            bufferPool.release(whBuffer)
+        }
+
+        memcpy(wBuffer.contents(), W, wBytes)
+        memcpy(vBuffer.contents(), V, vBytes)
+        memcpy(hBuffer.contents(), H, hBytes)
+        memcpy(whBuffer.contents(), WH, whBytes)
+
+        var mVar = UInt32(M)
+        var nVar = UInt32(N)
+        var kVar = UInt32(K)
+        var epsVar = epsilon
+
+        let pipeline = try getPipeline(for: "nmfUpdateH")
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalEngineError.commandBufferFailed
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(wBuffer, offset: 0, index: 0)
+        encoder.setBuffer(vBuffer, offset: 0, index: 1)
+        encoder.setBuffer(hBuffer, offset: 0, index: 2)
+        encoder.setBuffer(whBuffer, offset: 0, index: 3)
+        encoder.setBytes(&mVar, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&nVar, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&kVar, length: MemoryLayout<UInt32>.size, index: 6)
+        encoder.setBytes(&epsVar, length: MemoryLayout<Float>.size, index: 7)
+
+        let threadsPerGroup = MTLSize(width: 16, height: 16, depth: 1)
+        let threadGroups = MTLSize(
+            width: (N + threadsPerGroup.width - 1) / threadsPerGroup.width,
+            height: (K + threadsPerGroup.height - 1) / threadsPerGroup.height,
+            depth: 1
+        )
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let hPtr = hBuffer.contents().assumingMemoryBound(to: Float.self)
+        return Array(UnsafeBufferPointer(start: hPtr, count: K * N))
+    }
+
+    /// Compute NMF reconstruction error (Frobenius norm) on GPU.
+    ///
+    /// - Parameters:
+    ///   - V: Original matrix, flattened.
+    ///   - WH: Reconstruction (W @ H), flattened.
+    /// - Returns: Sum of squared differences.
+    public func nmfReconstructionError(
+        V: [Float],
+        WH: [Float]
+    ) async throws -> Float {
+        let count = V.count
+        let bufferBytes = count * MemoryLayout<Float>.size
+        let errorBytes = MemoryLayout<Float>.size
+
+        guard let vBuffer = bufferPool.acquire(minBytes: bufferBytes),
+              let whBuffer = bufferPool.acquire(minBytes: bufferBytes),
+              let errorBuffer = bufferPool.acquire(minBytes: errorBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer {
+            bufferPool.release(vBuffer)
+            bufferPool.release(whBuffer)
+            bufferPool.release(errorBuffer)
+        }
+
+        memcpy(vBuffer.contents(), V, bufferBytes)
+        memcpy(whBuffer.contents(), WH, bufferBytes)
+        memset(errorBuffer.contents(), 0, errorBytes)
+
+        var countVar = UInt32(count)
+
+        let pipeline = try getPipeline(for: "nmfReconstructionError")
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalEngineError.commandBufferFailed
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(vBuffer, offset: 0, index: 0)
+        encoder.setBuffer(whBuffer, offset: 0, index: 1)
+        encoder.setBuffer(errorBuffer, offset: 0, index: 2)
+        encoder.setBytes(&countVar, length: MemoryLayout<UInt32>.size, index: 3)
+
+        let threadsPerGroup = MTLSize(width: min(256, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+        let threadGroups = MTLSize(
+            width: (count + threadsPerGroup.width - 1) / threadsPerGroup.width,
+            height: 1,
+            depth: 1
+        )
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let errorPtr = errorBuffer.contents().assumingMemoryBound(to: Float.self)
+        return errorPtr.pointee
+    }
+
+    // MARK: - Distance Matrix
+
+    /// Compute Euclidean distance matrix between two feature sets on GPU.
+    ///
+    /// - Parameters:
+    ///   - xFeatures: First feature matrix (nFeatures × nX), flattened feature-major.
+    ///   - yFeatures: Second feature matrix (nFeatures × nY), flattened feature-major.
+    ///   - nFeatures: Number of features.
+    ///   - nX: Number of samples in X.
+    ///   - nY: Number of samples in Y.
+    /// - Returns: Distance matrix (nX × nY), flattened row-major.
+    public func euclideanDistanceMatrix(
+        xFeatures: [Float],
+        yFeatures: [Float],
+        nFeatures: Int,
+        nX: Int,
+        nY: Int
+    ) async throws -> [Float] {
+        let xBytes = xFeatures.count * MemoryLayout<Float>.size
+        let yBytes = yFeatures.count * MemoryLayout<Float>.size
+        let distBytes = nX * nY * MemoryLayout<Float>.size
+
+        guard let xBuffer = bufferPool.acquire(minBytes: xBytes),
+              let yBuffer = bufferPool.acquire(minBytes: yBytes),
+              let distBuffer = bufferPool.acquire(minBytes: distBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer {
+            bufferPool.release(xBuffer)
+            bufferPool.release(yBuffer)
+            bufferPool.release(distBuffer)
+        }
+
+        memcpy(xBuffer.contents(), xFeatures, xBytes)
+        memcpy(yBuffer.contents(), yFeatures, yBytes)
+
+        var nFeaturesVar = UInt32(nFeatures)
+        var nXVar = UInt32(nX)
+        var nYVar = UInt32(nY)
+
+        let pipeline = try getPipeline(for: "euclideanDistanceMatrix")
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalEngineError.commandBufferFailed
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(xBuffer, offset: 0, index: 0)
+        encoder.setBuffer(yBuffer, offset: 0, index: 1)
+        encoder.setBuffer(distBuffer, offset: 0, index: 2)
+        encoder.setBytes(&nFeaturesVar, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&nXVar, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&nYVar, length: MemoryLayout<UInt32>.size, index: 5)
+
+        let threadsPerGroup = MTLSize(width: 16, height: 16, depth: 1)
+        let threadGroups = MTLSize(
+            width: (nX + threadsPerGroup.width - 1) / threadsPerGroup.width,
+            height: (nY + threadsPerGroup.height - 1) / threadsPerGroup.height,
+            depth: 1
+        )
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let distPtr = distBuffer.contents().assumingMemoryBound(to: Float.self)
+        return Array(UnsafeBufferPointer(start: distPtr, count: nX * nY))
+    }
+
+    // MARK: - CQT Operations
+
+    /// Compute CQT correlation for a single octave using GPU.
+    ///
+    /// - Parameters:
+    ///   - signal: Padded signal.
+    ///   - filterReal: All filter real parts concatenated.
+    ///   - filterImag: All filter imaginary parts concatenated.
+    ///   - filterOffsets: Start offset in filterReal/Imag for each bin.
+    ///   - filterLengths: Length of each filter.
+    ///   - filterNorms: L1 norm for each filter.
+    ///   - normFactors: sqrt(filterLength) * sqrt(downsampleFactor) for each bin.
+    ///   - nBins: Number of frequency bins.
+    ///   - nFrames: Number of output frames.
+    ///   - hopLength: Hop length between frames.
+    ///   - padLength: Padding applied to signal.
+    /// - Returns: Tuple of (real, imag) output arrays [nBins × nFrames].
+    public func cqtCorrelation(
+        signal: [Float],
+        filterReal: [Float],
+        filterImag: [Float],
+        filterOffsets: [UInt32],
+        filterLengths: [UInt32],
+        filterNorms: [Float],
+        normFactors: [Float],
+        nBins: Int,
+        nFrames: Int,
+        hopLength: Int,
+        padLength: Int
+    ) async throws -> (real: [Float], imag: [Float]) {
+        let signalBytes = signal.count * MemoryLayout<Float>.size
+        let filterBytes = filterReal.count * MemoryLayout<Float>.size
+        let offsetBytes = filterOffsets.count * MemoryLayout<UInt32>.size
+        let lengthBytes = filterLengths.count * MemoryLayout<UInt32>.size
+        let normBytes = filterNorms.count * MemoryLayout<Float>.size
+        let outputBytes = nBins * nFrames * MemoryLayout<Float>.size
+
+        guard let signalBuffer = bufferPool.acquire(minBytes: signalBytes),
+              let filterRealBuffer = bufferPool.acquire(minBytes: filterBytes),
+              let filterImagBuffer = bufferPool.acquire(minBytes: filterBytes),
+              let offsetBuffer = bufferPool.acquire(minBytes: offsetBytes),
+              let lengthBuffer = bufferPool.acquire(minBytes: lengthBytes),
+              let normBuffer = bufferPool.acquire(minBytes: normBytes),
+              let factorBuffer = bufferPool.acquire(minBytes: normBytes),
+              let outRealBuffer = bufferPool.acquire(minBytes: outputBytes),
+              let outImagBuffer = bufferPool.acquire(minBytes: outputBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer {
+            bufferPool.release(signalBuffer)
+            bufferPool.release(filterRealBuffer)
+            bufferPool.release(filterImagBuffer)
+            bufferPool.release(offsetBuffer)
+            bufferPool.release(lengthBuffer)
+            bufferPool.release(normBuffer)
+            bufferPool.release(factorBuffer)
+            bufferPool.release(outRealBuffer)
+            bufferPool.release(outImagBuffer)
+        }
+
+        memcpy(signalBuffer.contents(), signal, signalBytes)
+        memcpy(filterRealBuffer.contents(), filterReal, filterBytes)
+        memcpy(filterImagBuffer.contents(), filterImag, filterBytes)
+        memcpy(offsetBuffer.contents(), filterOffsets, offsetBytes)
+        memcpy(lengthBuffer.contents(), filterLengths, lengthBytes)
+        memcpy(normBuffer.contents(), filterNorms, normBytes)
+        memcpy(factorBuffer.contents(), normFactors, normBytes)
+
+        var nBinsVar = UInt32(nBins)
+        var nFramesVar = UInt32(nFrames)
+        var hopLengthVar = UInt32(hopLength)
+        var padLengthVar = UInt32(padLength)
+        var signalLengthVar = UInt32(signal.count)
+
+        let pipeline = try getPipeline(for: "cqtCorrelation")
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalEngineError.commandBufferFailed
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(signalBuffer, offset: 0, index: 0)
+        encoder.setBuffer(filterRealBuffer, offset: 0, index: 1)
+        encoder.setBuffer(filterImagBuffer, offset: 0, index: 2)
+        encoder.setBuffer(offsetBuffer, offset: 0, index: 3)
+        encoder.setBuffer(lengthBuffer, offset: 0, index: 4)
+        encoder.setBuffer(normBuffer, offset: 0, index: 5)
+        encoder.setBuffer(factorBuffer, offset: 0, index: 6)
+        encoder.setBuffer(outRealBuffer, offset: 0, index: 7)
+        encoder.setBuffer(outImagBuffer, offset: 0, index: 8)
+        encoder.setBytes(&nBinsVar, length: MemoryLayout<UInt32>.size, index: 9)
+        encoder.setBytes(&nFramesVar, length: MemoryLayout<UInt32>.size, index: 10)
+        encoder.setBytes(&hopLengthVar, length: MemoryLayout<UInt32>.size, index: 11)
+        encoder.setBytes(&padLengthVar, length: MemoryLayout<UInt32>.size, index: 12)
+        encoder.setBytes(&signalLengthVar, length: MemoryLayout<UInt32>.size, index: 13)
+
+        let threadsPerGroup = MTLSize(width: 16, height: 16, depth: 1)
+        let threadGroups = MTLSize(
+            width: (nFrames + threadsPerGroup.width - 1) / threadsPerGroup.width,
+            height: (nBins + threadsPerGroup.height - 1) / threadsPerGroup.height,
+            depth: 1
+        )
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let realPtr = outRealBuffer.contents().assumingMemoryBound(to: Float.self)
+        let imagPtr = outImagBuffer.contents().assumingMemoryBound(to: Float.self)
+
+        return (
+            Array(UnsafeBufferPointer(start: realPtr, count: nBins * nFrames)),
+            Array(UnsafeBufferPointer(start: imagPtr, count: nBins * nFrames))
+        )
+    }
+
+    // MARK: - HPSS Operations
+
+    /// Apply horizontal median filter (along time axis) using GPU.
+    ///
+    /// - Parameters:
+    ///   - input: Input matrix flattened row-major [nFreqs × nFrames].
+    ///   - nFreqs: Number of frequency bins.
+    ///   - nFrames: Number of time frames.
+    ///   - kernelSize: Median filter kernel size.
+    /// - Returns: Filtered output.
+    public func hpssMedianFilterHorizontal(
+        input: [Float],
+        nFreqs: Int,
+        nFrames: Int,
+        kernelSize: Int
+    ) async throws -> [Float] {
+        let bufferBytes = input.count * MemoryLayout<Float>.size
+
+        guard let inputBuffer = bufferPool.acquire(minBytes: bufferBytes),
+              let outputBuffer = bufferPool.acquire(minBytes: bufferBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer {
+            bufferPool.release(inputBuffer)
+            bufferPool.release(outputBuffer)
+        }
+
+        memcpy(inputBuffer.contents(), input, bufferBytes)
+
+        var nFreqsVar = UInt32(nFreqs)
+        var nFramesVar = UInt32(nFrames)
+        var kernelVar = UInt32(kernelSize)
+
+        let pipeline = try getPipeline(for: "hpssMedianFilterHorizontal")
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalEngineError.commandBufferFailed
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        encoder.setBytes(&nFreqsVar, length: MemoryLayout<UInt32>.size, index: 2)
+        encoder.setBytes(&nFramesVar, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&kernelVar, length: MemoryLayout<UInt32>.size, index: 4)
+
+        let threadsPerGroup = MTLSize(width: 16, height: 16, depth: 1)
+        let threadGroups = MTLSize(
+            width: (nFrames + threadsPerGroup.width - 1) / threadsPerGroup.width,
+            height: (nFreqs + threadsPerGroup.height - 1) / threadsPerGroup.height,
+            depth: 1
+        )
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let outPtr = outputBuffer.contents().assumingMemoryBound(to: Float.self)
+        return Array(UnsafeBufferPointer(start: outPtr, count: input.count))
+    }
+
+    /// Apply vertical median filter (along frequency axis) using GPU.
+    public func hpssMedianFilterVertical(
+        input: [Float],
+        nFreqs: Int,
+        nFrames: Int,
+        kernelSize: Int
+    ) async throws -> [Float] {
+        let bufferBytes = input.count * MemoryLayout<Float>.size
+
+        guard let inputBuffer = bufferPool.acquire(minBytes: bufferBytes),
+              let outputBuffer = bufferPool.acquire(minBytes: bufferBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer {
+            bufferPool.release(inputBuffer)
+            bufferPool.release(outputBuffer)
+        }
+
+        memcpy(inputBuffer.contents(), input, bufferBytes)
+
+        var nFreqsVar = UInt32(nFreqs)
+        var nFramesVar = UInt32(nFrames)
+        var kernelVar = UInt32(kernelSize)
+
+        let pipeline = try getPipeline(for: "hpssMedianFilterVertical")
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalEngineError.commandBufferFailed
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        encoder.setBytes(&nFreqsVar, length: MemoryLayout<UInt32>.size, index: 2)
+        encoder.setBytes(&nFramesVar, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&kernelVar, length: MemoryLayout<UInt32>.size, index: 4)
+
+        let threadsPerGroup = MTLSize(width: 16, height: 16, depth: 1)
+        let threadGroups = MTLSize(
+            width: (nFrames + threadsPerGroup.width - 1) / threadsPerGroup.width,
+            height: (nFreqs + threadsPerGroup.height - 1) / threadsPerGroup.height,
+            depth: 1
+        )
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let outPtr = outputBuffer.contents().assumingMemoryBound(to: Float.self)
+        return Array(UnsafeBufferPointer(start: outPtr, count: input.count))
+    }
+
+    /// Compute HPSS soft masks using GPU.
+    ///
+    /// - Parameters:
+    ///   - harmonicEnhanced: Harmonic-enhanced spectrogram, flattened.
+    ///   - percussiveEnhanced: Percussive-enhanced spectrogram, flattened.
+    ///   - power: Mask power (2.0 for Wiener filtering).
+    ///   - margin: Separation margin.
+    ///   - epsilon: Numerical stability constant.
+    /// - Returns: Tuple of (harmonicMask, percussiveMask).
+    public func hpssSoftMask(
+        harmonicEnhanced: [Float],
+        percussiveEnhanced: [Float],
+        power: Float,
+        margin: Float,
+        epsilon: Float
+    ) async throws -> (harmonic: [Float], percussive: [Float]) {
+        let count = harmonicEnhanced.count
+        let bufferBytes = count * MemoryLayout<Float>.size
+
+        guard let hBuffer = bufferPool.acquire(minBytes: bufferBytes),
+              let pBuffer = bufferPool.acquire(minBytes: bufferBytes),
+              let maskHBuffer = bufferPool.acquire(minBytes: bufferBytes),
+              let maskPBuffer = bufferPool.acquire(minBytes: bufferBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer {
+            bufferPool.release(hBuffer)
+            bufferPool.release(pBuffer)
+            bufferPool.release(maskHBuffer)
+            bufferPool.release(maskPBuffer)
+        }
+
+        memcpy(hBuffer.contents(), harmonicEnhanced, bufferBytes)
+        memcpy(pBuffer.contents(), percussiveEnhanced, bufferBytes)
+
+        var countVar = UInt32(count)
+        var powerVar = power
+        var marginVar = margin
+        var epsVar = epsilon
+
+        let pipeline = try getPipeline(for: "hpssSoftMask")
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalEngineError.commandBufferFailed
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(hBuffer, offset: 0, index: 0)
+        encoder.setBuffer(pBuffer, offset: 0, index: 1)
+        encoder.setBuffer(maskHBuffer, offset: 0, index: 2)
+        encoder.setBuffer(maskPBuffer, offset: 0, index: 3)
+        encoder.setBytes(&countVar, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&powerVar, length: MemoryLayout<Float>.size, index: 5)
+        encoder.setBytes(&marginVar, length: MemoryLayout<Float>.size, index: 6)
+        encoder.setBytes(&epsVar, length: MemoryLayout<Float>.size, index: 7)
+
+        let threadsPerGroup = MTLSize(width: min(256, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+        let threadGroups = MTLSize(
+            width: (count + threadsPerGroup.width - 1) / threadsPerGroup.width,
+            height: 1,
+            depth: 1
+        )
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let maskHPtr = maskHBuffer.contents().assumingMemoryBound(to: Float.self)
+        let maskPPtr = maskPBuffer.contents().assumingMemoryBound(to: Float.self)
+
+        return (
+            Array(UnsafeBufferPointer(start: maskHPtr, count: count)),
+            Array(UnsafeBufferPointer(start: maskPPtr, count: count))
+        )
+    }
+
+    // MARK: - Griffin-Lim Operations
+
+    /// Perform Griffin-Lim magnitude replacement using GPU.
+    ///
+    /// - Parameters:
+    ///   - currentReal: Current STFT real part, flattened.
+    ///   - currentImag: Current STFT imaginary part, flattened.
+    ///   - targetMagnitude: Target magnitude spectrogram, flattened.
+    ///   - epsilon: Numerical stability constant.
+    /// - Returns: Tuple of (newReal, newImag) with target magnitude and preserved phase.
+    public func griffinLimMagnitudeReplace(
+        currentReal: [Float],
+        currentImag: [Float],
+        targetMagnitude: [Float],
+        epsilon: Float
+    ) async throws -> (real: [Float], imag: [Float]) {
+        let count = currentReal.count
+        let bufferBytes = count * MemoryLayout<Float>.size
+
+        guard let realBuffer = bufferPool.acquire(minBytes: bufferBytes),
+              let imagBuffer = bufferPool.acquire(minBytes: bufferBytes),
+              let magBuffer = bufferPool.acquire(minBytes: bufferBytes),
+              let outRealBuffer = bufferPool.acquire(minBytes: bufferBytes),
+              let outImagBuffer = bufferPool.acquire(minBytes: bufferBytes) else {
+            throw MetalEngineError.bufferCreationFailed
+        }
+        defer {
+            bufferPool.release(realBuffer)
+            bufferPool.release(imagBuffer)
+            bufferPool.release(magBuffer)
+            bufferPool.release(outRealBuffer)
+            bufferPool.release(outImagBuffer)
+        }
+
+        memcpy(realBuffer.contents(), currentReal, bufferBytes)
+        memcpy(imagBuffer.contents(), currentImag, bufferBytes)
+        memcpy(magBuffer.contents(), targetMagnitude, bufferBytes)
+
+        var countVar = UInt32(count)
+        var epsVar = epsilon
+
+        let pipeline = try getPipeline(for: "griffinLimMagnitudeReplace")
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalEngineError.commandBufferFailed
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(realBuffer, offset: 0, index: 0)
+        encoder.setBuffer(imagBuffer, offset: 0, index: 1)
+        encoder.setBuffer(magBuffer, offset: 0, index: 2)
+        encoder.setBuffer(outRealBuffer, offset: 0, index: 3)
+        encoder.setBuffer(outImagBuffer, offset: 0, index: 4)
+        encoder.setBytes(&countVar, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&epsVar, length: MemoryLayout<Float>.size, index: 6)
+
+        let threadsPerGroup = MTLSize(width: min(256, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+        let threadGroups = MTLSize(
+            width: (count + threadsPerGroup.width - 1) / threadsPerGroup.width,
+            height: 1,
+            depth: 1
+        )
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadsPerGroup)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let outRealPtr = outRealBuffer.contents().assumingMemoryBound(to: Float.self)
+        let outImagPtr = outImagBuffer.contents().assumingMemoryBound(to: Float.self)
+
+        return (
+            Array(UnsafeBufferPointer(start: outRealPtr, count: count)),
+            Array(UnsafeBufferPointer(start: outImagPtr, count: count))
+        )
+    }
 }

@@ -1001,3 +1001,337 @@ kernel void nnMedianFilter(
 
     output[featureIdx * nFrames + frameIdx] = median;
 }
+
+// MARK: - CQT Correlation
+
+/// CQT time-domain correlation kernel.
+///
+/// Computes correlation between signal frames and CQT filter bank.
+/// Each thread handles one (bin, frame) pair.
+///
+/// Input layout:
+/// - signal: Padded signal [signalLength]
+/// - filterReal/filterImag: All filters concatenated [sum of filter lengths]
+/// - filterOffsets: Start offset in filterReal/Imag for each bin [nBins]
+/// - filterLengths: Length of each filter [nBins]
+/// - filterNorms: L1 norm for each filter [nBins]
+/// - normFactors: sqrt(filterLength) * sqrt(downsampleFactor) for each bin [nBins]
+///
+/// Output layout:
+/// - outReal/outImag: [nBins × nFrames] row-major
+kernel void cqtCorrelation(
+    device const float* signal [[buffer(0)]],
+    device const float* filterReal [[buffer(1)]],
+    device const float* filterImag [[buffer(2)]],
+    device const uint* filterOffsets [[buffer(3)]],
+    device const uint* filterLengths [[buffer(4)]],
+    device const float* filterNorms [[buffer(5)]],
+    device const float* normFactors [[buffer(6)]],
+    device float* outReal [[buffer(7)]],
+    device float* outImag [[buffer(8)]],
+    constant uint& nBins [[buffer(9)]],
+    constant uint& nFrames [[buffer(10)]],
+    constant uint& hopLength [[buffer(11)]],
+    constant uint& padLength [[buffer(12)]],
+    constant uint& signalLength [[buffer(13)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint frameIdx = gid.x;
+    uint binIdx = gid.y;
+
+    if (frameIdx >= nFrames || binIdx >= nBins) {
+        return;
+    }
+
+    // Get filter parameters for this bin
+    uint filterOffset = filterOffsets[binIdx];
+    uint filterLen = filterLengths[binIdx];
+    float l1Norm = filterNorms[binIdx];
+    float normFactor = normFactors[binIdx];
+
+    // Frame center position in padded signal
+    uint frameCenter = padLength + frameIdx * hopLength;
+    uint halfLen = filterLen / 2;
+
+    // Start position for correlation
+    int startIdx = int(frameCenter) - int(halfLen);
+
+    // Compute correlation
+    float sumReal = 0.0f;
+    float sumImag = 0.0f;
+
+    for (uint i = 0; i < filterLen; i++) {
+        int sigIdx = startIdx + int(i);
+
+        // Bounds check
+        if (sigIdx >= 0 && uint(sigIdx) < signalLength) {
+            float sigVal = signal[sigIdx];
+            // Correlation with conjugate: signal * (re - j*im)
+            sumReal += sigVal * filterReal[filterOffset + i];
+            sumImag -= sigVal * filterImag[filterOffset + i];  // Conjugate
+        }
+    }
+
+    // Normalize
+    if (l1Norm > 0.0f) {
+        float scale = normFactor / l1Norm;
+        sumReal *= scale;
+        sumImag *= scale;
+    }
+
+    // Output in row-major: [binIdx * nFrames + frameIdx]
+    uint outIdx = binIdx * nFrames + frameIdx;
+    outReal[outIdx] = sumReal;
+    outImag[outIdx] = sumImag;
+}
+
+/// Batch CQT correlation - processes multiple octaves at once.
+///
+/// Similar to cqtCorrelation but with octave indexing for multi-resolution CQT.
+kernel void cqtCorrelationBatch(
+    device const float* signal [[buffer(0)]],
+    device const float* filterReal [[buffer(1)]],
+    device const float* filterImag [[buffer(2)]],
+    device const uint* filterOffsets [[buffer(3)]],
+    device const uint* filterLengths [[buffer(4)]],
+    device const float* filterNorms [[buffer(5)]],
+    device const float* normFactors [[buffer(6)]],
+    device const uint* binToGlobalBin [[buffer(7)]],
+    device float* outReal [[buffer(8)]],
+    device float* outImag [[buffer(9)]],
+    constant uint& nLocalBins [[buffer(10)]],
+    constant uint& nLocalFrames [[buffer(11)]],
+    constant uint& nGlobalFrames [[buffer(12)]],
+    constant uint& hopLength [[buffer(13)]],
+    constant uint& padLength [[buffer(14)]],
+    constant uint& signalLength [[buffer(15)]],
+    constant float& frameScale [[buffer(16)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint localFrameIdx = gid.x;
+    uint localBinIdx = gid.y;
+
+    if (localFrameIdx >= nLocalFrames || localBinIdx >= nLocalBins) {
+        return;
+    }
+
+    // Map local frame to global output frame
+    uint globalFrameIdx = min(uint(float(localFrameIdx) * frameScale), nGlobalFrames - 1);
+    uint globalBinIdx = binToGlobalBin[localBinIdx];
+
+    // Get filter parameters
+    uint filterOffset = filterOffsets[localBinIdx];
+    uint filterLen = filterLengths[localBinIdx];
+    float l1Norm = filterNorms[localBinIdx];
+    float normFactor = normFactors[localBinIdx];
+
+    // Frame center
+    uint frameCenter = padLength + localFrameIdx * hopLength;
+    uint halfLen = filterLen / 2;
+    int startIdx = int(frameCenter) - int(halfLen);
+
+    // Correlation
+    float sumReal = 0.0f;
+    float sumImag = 0.0f;
+
+    for (uint i = 0; i < filterLen; i++) {
+        int sigIdx = startIdx + int(i);
+        if (sigIdx >= 0 && uint(sigIdx) < signalLength) {
+            float sigVal = signal[sigIdx];
+            sumReal += sigVal * filterReal[filterOffset + i];
+            sumImag -= sigVal * filterImag[filterOffset + i];
+        }
+    }
+
+    // Normalize
+    if (l1Norm > 0.0f) {
+        float scale = normFactor / l1Norm;
+        sumReal *= scale;
+        sumImag *= scale;
+    }
+
+    // Output to global position
+    uint outIdx = globalBinIdx * nGlobalFrames + globalFrameIdx;
+    outReal[outIdx] = sumReal;
+    outImag[outIdx] = sumImag;
+}
+
+// MARK: - HPSS Median Filter
+
+/// Horizontal median filter for HPSS (filters along time axis).
+///
+/// Uses a fixed-size window for median computation.
+/// This is optimized for the HPSS use case where kernel sizes are typically 11-31.
+kernel void hpssMedianFilterHorizontal(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& nFreqs [[buffer(2)]],
+    constant uint& nFrames [[buffer(3)]],
+    constant uint& kernelSize [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint frameIdx = gid.x;
+    uint freqIdx = gid.y;
+
+    if (frameIdx >= nFrames || freqIdx >= nFreqs) {
+        return;
+    }
+
+    int halfKernel = int(kernelSize) / 2;
+
+    // Gather values in window
+    float values[64];  // Max kernel size 64
+    uint count = 0;
+
+    for (int t = -halfKernel; t <= halfKernel && count < 64; t++) {
+        int idx = int(frameIdx) + t;
+        if (idx >= 0 && idx < int(nFrames)) {
+            values[count++] = input[freqIdx * nFrames + uint(idx)];
+        }
+    }
+
+    // Insertion sort for median
+    for (uint i = 1; i < count; i++) {
+        float val = values[i];
+        uint j = i;
+        while (j > 0 && values[j - 1] > val) {
+            values[j] = values[j - 1];
+            j--;
+        }
+        values[j] = val;
+    }
+
+    // Median
+    float median = values[count / 2];
+
+    output[freqIdx * nFrames + frameIdx] = median;
+}
+
+/// Vertical median filter for HPSS (filters along frequency axis).
+kernel void hpssMedianFilterVertical(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& nFreqs [[buffer(2)]],
+    constant uint& nFrames [[buffer(3)]],
+    constant uint& kernelSize [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint frameIdx = gid.x;
+    uint freqIdx = gid.y;
+
+    if (frameIdx >= nFrames || freqIdx >= nFreqs) {
+        return;
+    }
+
+    int halfKernel = int(kernelSize) / 2;
+
+    // Gather values in window
+    float values[64];
+    uint count = 0;
+
+    for (int f = -halfKernel; f <= halfKernel && count < 64; f++) {
+        int idx = int(freqIdx) + f;
+        if (idx >= 0 && idx < int(nFreqs)) {
+            values[count++] = input[uint(idx) * nFrames + frameIdx];
+        }
+    }
+
+    // Insertion sort
+    for (uint i = 1; i < count; i++) {
+        float val = values[i];
+        uint j = i;
+        while (j > 0 && values[j - 1] > val) {
+            values[j] = values[j - 1];
+            j--;
+        }
+        values[j] = val;
+    }
+
+    float median = values[count / 2];
+
+    output[freqIdx * nFrames + frameIdx] = median;
+}
+
+/// Compute HPSS soft masks using Wiener filtering.
+///
+/// Computes harmonic and percussive masks from enhanced spectrograms.
+/// maskH = H^power / (H^power + P^power + eps)
+/// maskP = P^power / (H^power + P^power + eps)
+kernel void hpssSoftMask(
+    device const float* harmonicEnhanced [[buffer(0)]],
+    device const float* percussiveEnhanced [[buffer(1)]],
+    device float* maskHarmonic [[buffer(2)]],
+    device float* maskPercussive [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant float& power [[buffer(5)]],
+    constant float& margin [[buffer(6)]],
+    constant float& epsilon [[buffer(7)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= count) {
+        return;
+    }
+
+    float h = harmonicEnhanced[gid];
+    float p = percussiveEnhanced[gid];
+
+    // Compute powers
+    float hPow, pPow;
+    if (power == 2.0f) {
+        // Fast path for Wiener filtering
+        hPow = h * h;
+        pPow = p * p;
+    } else {
+        hPow = pow(h, power);
+        pPow = pow(p, power);
+    }
+
+    // Apply margin
+    hPow *= margin;
+    pPow *= margin;
+
+    float total = hPow + pPow + epsilon;
+
+    maskHarmonic[gid] = hPow / total;
+    maskPercussive[gid] = pPow / total;
+}
+
+// MARK: - Griffin-Lim
+
+/// Griffin-Lim magnitude replacement kernel.
+///
+/// Replaces magnitude while preserving phase from STFT result.
+/// outReal = targetMag * cos(phase)
+/// outImag = targetMag * sin(phase)
+kernel void griffinLimMagnitudeReplace(
+    device const float* currentReal [[buffer(0)]],
+    device const float* currentImag [[buffer(1)]],
+    device const float* targetMagnitude [[buffer(2)]],
+    device float* outReal [[buffer(3)]],
+    device float* outImag [[buffer(4)]],
+    constant uint& count [[buffer(5)]],
+    constant float& epsilon [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= count) {
+        return;
+    }
+
+    float re = currentReal[gid];
+    float im = currentImag[gid];
+    float targetMag = targetMagnitude[gid];
+
+    // Compute current magnitude
+    float currentMag = sqrt(re * re + im * im);
+
+    if (currentMag > epsilon) {
+        // Scale to target magnitude while preserving phase
+        float scale = targetMag / currentMag;
+        outReal[gid] = re * scale;
+        outImag[gid] = im * scale;
+    } else {
+        // Zero phase - just use real component
+        outReal[gid] = targetMag;
+        outImag[gid] = 0.0f;
+    }
+}

@@ -92,6 +92,40 @@ public struct Delta {
 
     // MARK: - Private Implementation
 
+    /// Pre-compute Savitzky-Golay-like filter coefficients for first derivative.
+    ///
+    /// The delta filter is: [-halfWidth, ..., -1, 0, 1, ..., halfWidth] / norm
+    /// where norm = 2 * sum(n²) for n in 1...halfWidth
+    private static func computeFilterCoefficients(width: Int) -> [Float] {
+        let halfWidth = width / 2
+
+        // Normalization factor: 2 * sum(n²)
+        var norm: Float = 0
+        for n in 1...halfWidth {
+            norm += Float(n * n)
+        }
+        norm *= 2
+
+        // Build filter: [-halfWidth, ..., -1, 0, 1, ..., halfWidth]
+        var filter = [Float](repeating: 0, count: width)
+        for n in 1...halfWidth {
+            filter[halfWidth - n] = Float(-n) / norm  // Left side (negative)
+            filter[halfWidth + n] = Float(n) / norm   // Right side (positive)
+        }
+        // Center element is 0 (already initialized)
+
+        return filter
+    }
+
+    /// Optimized first-order delta using vectorized operations.
+    ///
+    /// This implementation uses:
+    /// - vDSP_vsub for vectorized differences (x[t+n] - x[t-n])
+    /// - Pre-computed weights
+    /// - In-place accumulation
+    ///
+    /// The delta formula is: delta[t] = sum(n * (x[t+n] - x[t-n])) / norm
+    /// We compute this efficiently by processing each offset n separately.
     private static func computeFirstOrder(
         _ features: [[Float]],
         width: Int,
@@ -108,28 +142,106 @@ public struct Delta {
         }
         norm *= 2
 
+        // Pre-compute weights: n / norm for each offset
+        var weights = [Float](repeating: 0, count: halfWidth)
+        for n in 1...halfWidth {
+            weights[n - 1] = Float(n) / norm
+        }
+
         var deltaFeatures = [[Float]]()
         deltaFeatures.reserveCapacity(nFeatures)
 
+        // Temporary buffers for padded row and differences
+        let paddedLen = halfWidth + nFrames + halfWidth
+        var padded = [Float](repeating: 0, count: paddedLen)
+        var diff = [Float](repeating: 0, count: nFrames)
+
+        // Process each feature row
         for f in 0..<nFeatures {
+            let row = features[f]
+
+            // Pad the row once - use memcpy for center data
+            row.withUnsafeBufferPointer { rowPtr in
+                padded.withUnsafeMutableBufferPointer { paddedPtr in
+                    // Copy center data
+                    memcpy(paddedPtr.baseAddress! + halfWidth, rowPtr.baseAddress!, nFrames * MemoryLayout<Float>.size)
+                }
+            }
+
+            // Pad edges (small number of elements, loop is fine)
+            for i in 0..<halfWidth {
+                let leftIdx = getIndex(-halfWidth + i, count: nFrames, mode: mode)
+                padded[i] = row[leftIdx]
+                let rightIdx = getIndex(nFrames + i, count: nFrames, mode: mode)
+                padded[halfWidth + nFrames + i] = row[rightIdx]
+            }
+
+            // Initialize delta row to zero
             var deltaRow = [Float](repeating: 0, count: nFrames)
 
-            for t in 0..<nFrames {
-                var sum: Float = 0
+            // Accumulate weighted differences for each offset
+            padded.withUnsafeBufferPointer { paddedPtr in
+                deltaRow.withUnsafeMutableBufferPointer { deltaPtr in
+                    let paddedBase = paddedPtr.baseAddress!
+                    let deltaBase = deltaPtr.baseAddress!
 
-                for n in 1...halfWidth {
-                    let leftIdx = getIndex(t - n, count: nFrames, mode: mode)
-                    let rightIdx = getIndex(t + n, count: nFrames, mode: mode)
-                    sum += Float(n) * (features[f][rightIdx] - features[f][leftIdx])
+                    for n in 1...halfWidth {
+                        let weight = weights[n - 1]
+                        let leftOffset = halfWidth - n   // Points to x[t-n] for t=0
+                        let rightOffset = halfWidth + n  // Points to x[t+n] for t=0
+
+                        // Compute x[t+n] - x[t-n] for all t
+                        diff.withUnsafeMutableBufferPointer { diffPtr in
+                            vDSP_vsub(
+                                paddedBase + leftOffset, 1,   // x[t-n]
+                                paddedBase + rightOffset, 1,  // x[t+n]
+                                diffPtr.baseAddress!, 1,
+                                vDSP_Length(nFrames)
+                            )
+
+                            // Accumulate: delta += weight * diff
+                            var w = weight
+                            vDSP_vsma(
+                                diffPtr.baseAddress!, 1,
+                                &w,
+                                deltaBase, 1,
+                                deltaBase, 1,
+                                vDSP_Length(nFrames)
+                            )
+                        }
+                    }
                 }
-
-                deltaRow[t] = sum / norm
             }
 
             deltaFeatures.append(deltaRow)
         }
 
         return deltaFeatures
+    }
+
+    /// Pad a row of features according to the edge mode.
+    private static func padRow(_ row: [Float], halfWidth: Int, mode: DeltaEdgeMode) -> [Float] {
+        let nFrames = row.count
+        var padded = [Float](repeating: 0, count: halfWidth + nFrames + halfWidth)
+
+        // Copy center data
+        for i in 0..<nFrames {
+            padded[halfWidth + i] = row[i]
+        }
+
+        // Pad left edge
+        for i in 0..<halfWidth {
+            let idx = getIndex(-halfWidth + i, count: nFrames, mode: mode)
+            padded[i] = row[idx]
+        }
+
+        // Pad right edge
+        for i in 0..<halfWidth {
+            let idx = getIndex(nFrames + i, count: nFrames, mode: mode)
+            padded[halfWidth + nFrames + i] = row[idx]
+        }
+
+        return padded
     }
 
     private static func getIndex(_ idx: Int, count: Int, mode: DeltaEdgeMode) -> Int {
