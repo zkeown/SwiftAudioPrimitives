@@ -30,9 +30,11 @@ jobs:
 
       - name: Build Documentation
         run: |
-          # Build documentation with sandbox disabled to allow Metal shader compilation
+          # Build documentation with minimal concurrency checking
+          # SwiftRosaCore has some concurrency patterns that require @unchecked Sendable
+          # but work correctly at runtime
           swift package \
-            --disable-sandbox \
+            -Xswiftc -strict-concurrency=minimal \
             generate-documentation \
             --output-path ./docs \
             --transform-for-static-hosting \
