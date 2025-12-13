@@ -155,61 +155,57 @@ public struct MFCC: Sendable {
     /// - ref=1.0 (default) for absolute dB
     /// - amin=1e-10 as minimum amplitude floor
     /// - top_db=80.0 for dynamic range limiting
+    ///
+    /// OPTIMIZED: Single-pass vectorized processing with minimal allocations.
     private func applyLogCompression(_ melSpec: [[Float]]) -> [[Float]] {
-        let amin: Float = 1e-10
-        let topDb: Float = 80.0  // librosa default
-        let ref: Float = 1.0     // librosa default ref value
         let rows = melSpec.count
         guard rows > 0 else { return [] }
         let cols = melSpec[0].count
+        let totalCount = rows * cols
 
-        var result = [[Float]]()
-        result.reserveCapacity(rows)
+        // Constants
+        var amin: Float = 1e-10
+        var maxClip: Float = Float.greatestFiniteMagnitude
+        let topDb: Float = 80.0
+        var scale: Float = 10.0 / log(10.0)  // 10 * log10(x) = 10 * ln(x) / ln(10)
+        var n = Int32(totalCount)
 
-        // Precompute log10 scale factor: log10(x) = ln(x) / ln(10)
-        let log10Scale: Float = 1.0 / log(10.0)
-        let logRef: Float = 10.0 * log10(ref)
-
-        // First pass: compute all dB values and find max for top_db thresholding
-        var maxDb: Float = -Float.greatestFiniteMagnitude
-
-        for row in melSpec {
-            var dbRow = [Float](repeating: 0, count: cols)
-
-            // Clamp to minimum value
-            var clampedRow = [Float](repeating: 0, count: cols)
-            var aminVar = amin
-            var maxVal: Float = .greatestFiniteMagnitude
-            vDSP_vclip(row, 1, &aminVar, &maxVal, &clampedRow, 1, vDSP_Length(cols))
-
-            // Apply vectorized natural log using vForce
-            var logRow = [Float](repeating: 0, count: cols)
-            var n = Int32(cols)
-            vvlogf(&logRow, clampedRow, &n)
-
-            // Convert to dB: 10 * log10(S/ref) = 10 * log10(S) - 10 * log10(ref)
-            var scale: Float = 10.0 * log10Scale
-            vDSP_vsmul(logRow, 1, &scale, &dbRow, 1, vDSP_Length(cols))
-
-            // Subtract log(ref) (for ref=1.0 this is 0, but keep for correctness)
-            if logRef != 0 {
-                var negLogRef = -logRef
-                vDSP_vsadd(dbRow, 1, &negLogRef, &dbRow, 1, vDSP_Length(cols))
+        // Flatten input into contiguous array using memcpy
+        var flat = [Float](repeating: 0, count: totalCount)
+        flat.withUnsafeMutableBufferPointer { flatPtr in
+            var offset = 0
+            for row in melSpec {
+                row.withUnsafeBufferPointer { rowPtr in
+                    memcpy(flatPtr.baseAddress! + offset, rowPtr.baseAddress!, cols * MemoryLayout<Float>.size)
+                }
+                offset += cols
             }
-
-            // Track max for top_db thresholding
-            var rowMax: Float = 0
-            vDSP_maxv(dbRow, 1, &rowMax, vDSP_Length(cols))
-            maxDb = max(maxDb, rowMax)
-
-            result.append(dbRow)
         }
 
-        // Second pass: apply top_db threshold relative to max
-        let threshold = maxDb - topDb
-        for i in 0..<rows {
-            var thresholdVar = threshold
-            vDSP_vthr(result[i], 1, &thresholdVar, &result[i], 1, vDSP_Length(cols))
+        // Single-pass processing: clamp -> log -> scale
+        // Step 1: Clamp to minimum (in-place)
+        vDSP_vclip(flat, 1, &amin, &maxClip, &flat, 1, vDSP_Length(totalCount))
+
+        // Step 2: Natural log (in-place via vForce)
+        vvlogf(&flat, flat, &n)
+
+        // Step 3: Scale to dB (in-place)
+        vDSP_vsmul(flat, 1, &scale, &flat, 1, vDSP_Length(totalCount))
+
+        // Step 4: Find max for top_db threshold
+        var maxDb: Float = 0
+        vDSP_maxv(flat, 1, &maxDb, vDSP_Length(totalCount))
+
+        // Step 5: Apply threshold (in-place)
+        var threshold = maxDb - topDb
+        vDSP_vthr(flat, 1, &threshold, &flat, 1, vDSP_Length(totalCount))
+
+        // Reshape back to 2D using Array slicing (efficient since flat is contiguous)
+        var result = [[Float]]()
+        result.reserveCapacity(rows)
+        for r in 0..<rows {
+            let start = r * cols
+            result.append(Array(flat[start..<(start + cols)]))
         }
 
         return result
@@ -219,15 +215,20 @@ public struct MFCC: Sendable {
     ///
     /// Uses vDSP_mmul for optimized matrix multiplication:
     /// mfcc = dctMatrix (nMFCC x nMels) * logMel (nMels x nFrames) = result (nMFCC x nFrames)
+    ///
+    /// OPTIMIZED: Uses memcpy for flattening and efficient reshaping.
     private func applyDCT(_ logMel: [[Float]]) -> [[Float]] {
         let inputMels = logMel.count
-        let nFrames = logMel[0].count
+        guard inputMels > 0, let firstRow = logMel.first, !firstRow.isEmpty else { return [] }
+        let nFrames = firstRow.count
 
-        // Flatten logMel to row-major format (nMels x nFrames)
+        // Flatten logMel to row-major format (nMels x nFrames) using memcpy
         var flatLogMel = [Float](repeating: 0, count: inputMels * nFrames)
-        for m in 0..<inputMels {
-            for t in 0..<nFrames {
-                flatLogMel[m * nFrames + t] = logMel[m][t]
+        flatLogMel.withUnsafeMutableBufferPointer { flatPtr in
+            for m in 0..<inputMels {
+                logMel[m].withUnsafeBufferPointer { rowPtr in
+                    memcpy(flatPtr.baseAddress! + m * nFrames, rowPtr.baseAddress!, nFrames * MemoryLayout<Float>.size)
+                }
             }
         }
 
@@ -248,10 +249,9 @@ public struct MFCC: Sendable {
             vDSP_Length(nMels)          // K: columns of A, rows of B
         )
 
-        // Reshape to [[Float]]
+        // Reshape to [[Float]] using Array slicing
         var mfcc = [[Float]]()
         mfcc.reserveCapacity(nMFCC)
-
         for k in 0..<nMFCC {
             let start = k * nFrames
             mfcc.append(Array(flatMFCC[start..<(start + nFrames)]))

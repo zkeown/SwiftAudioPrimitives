@@ -2,6 +2,40 @@ import SwiftRosaCore
 import Accelerate
 import Foundation
 
+// MARK: - GPU Acceleration Support
+
+/// Internal helper for GPU-accelerated distance matrix computation.
+/// Uses a singleton pattern to avoid creating multiple MetalEngine instances.
+private actor DTWMetalHelper {
+    /// Shared singleton instance to avoid GPU resource leaks.
+    static let shared = DTWMetalHelper()
+
+    private var engine: MetalEngine?
+
+    private init() {
+        if MetalEngine.isAvailable {
+            self.engine = try? MetalEngine()
+        }
+    }
+
+    func computeDistanceMatrix(
+        xFeatures: [Float],
+        yFeatures: [Float],
+        nFeatures: Int,
+        nX: Int,
+        nY: Int
+    ) async throws -> [Float]? {
+        guard let engine = engine else { return nil }
+        return try await engine.euclideanDistanceMatrix(
+            xFeatures: xFeatures,
+            yFeatures: yFeatures,
+            nFeatures: nFeatures,
+            nX: nX,
+            nY: nY
+        )
+    }
+}
+
 /// Distance metric for DTW.
 public enum DTWDistanceMetric: Sendable {
     /// Euclidean distance.
@@ -101,16 +135,31 @@ public struct SubsequenceDTWResult: Sendable {
 ///
 /// // Find query in longer reference
 /// let subResult = dtw.subsequenceAlign(query: short, reference: long)
+///
+/// // GPU-accelerated alignment for large sequences
+/// let gpuResult = await dtw.alignAsync(sequence1, sequence2)
 /// ```
+///
+/// ## GPU Acceleration
+///
+/// For large sequences (> 50K distance computations), Metal GPU acceleration
+/// is automatically used for the distance matrix computation, providing
+/// significant speedup. Use `alignAsync` or `distanceAsync` for GPU support.
 public struct DTW: Sendable {
     /// Configuration.
     public let config: DTWConfig
 
+    /// Whether to use GPU acceleration when available.
+    public let useGPU: Bool
+
     /// Create a DTW processor.
     ///
-    /// - Parameter config: Configuration.
-    public init(config: DTWConfig = DTWConfig()) {
+    /// - Parameters:
+    ///   - config: Configuration.
+    ///   - useGPU: Whether to use GPU acceleration (default: true).
+    public init(config: DTWConfig = DTWConfig(), useGPU: Bool = true) {
         self.config = config
+        self.useGPU = useGPU
     }
 
     /// Compute DTW distance and alignment path.
@@ -177,6 +226,126 @@ public struct DTW: Sendable {
             path: path,
             costMatrix: includeCostMatrix ? cost : nil
         )
+    }
+
+    /// Compute DTW distance and alignment path with GPU acceleration.
+    ///
+    /// Uses Metal GPU for distance matrix computation when beneficial.
+    ///
+    /// - Parameters:
+    ///   - x: First sequence (nFeatures, nFramesX).
+    ///   - y: Second sequence (nFeatures, nFramesY).
+    ///   - includeCostMatrix: Include cost matrix in result (default: false).
+    /// - Returns: DTW result with distance and path.
+    public func alignAsync(
+        _ x: [[Float]],
+        _ y: [[Float]],
+        includeCostMatrix: Bool = false
+    ) async -> DTWResult {
+        guard !x.isEmpty && !y.isEmpty && !x[0].isEmpty && !y[0].isEmpty else {
+            return DTWResult(distance: Float.infinity, normalizedDistance: Float.infinity, path: [], costMatrix: nil)
+        }
+
+        let nX = x[0].count
+        let nY = y[0].count
+        let nFeatures = x.count
+        let totalDistances = nX * nY
+
+        // Check if GPU acceleration is beneficial (only for Euclidean distance)
+        let shouldUseGPU = useGPU && config.metric == .euclidean &&
+                          MetalEngine.isAvailable &&
+                          MetalEngine.shouldUseGPU(elementCount: totalDistances * nFeatures, operationType: .matrixMultiply)
+
+        // Compute distance matrix (GPU or CPU)
+        let distMatrix: [[Float]]
+
+        if shouldUseGPU {
+            // Flatten features for GPU (feature-major layout)
+            var xFlat = [Float](repeating: 0, count: nFeatures * nX)
+            var yFlat = [Float](repeating: 0, count: nFeatures * nY)
+
+            for f in 0..<nFeatures {
+                for i in 0..<nX {
+                    xFlat[f * nX + i] = x[f][i]
+                }
+                for j in 0..<nY {
+                    yFlat[f * nY + j] = y[f][j]
+                }
+            }
+
+            if let flatDist = try? await DTWMetalHelper.shared.computeDistanceMatrix(
+                xFeatures: xFlat,
+                yFeatures: yFlat,
+                nFeatures: nFeatures,
+                nX: nX,
+                nY: nY
+            ) {
+                // Unflatten to 2D (row-major: [nX][nY])
+                var dist2D = [[Float]](repeating: [Float](repeating: 0, count: nY), count: nX)
+                for i in 0..<nX {
+                    for j in 0..<nY {
+                        dist2D[i][j] = flatDist[i * nY + j]
+                    }
+                }
+                distMatrix = dist2D
+            } else {
+                distMatrix = computeDistanceMatrix(x, y)
+            }
+        } else {
+            distMatrix = computeDistanceMatrix(x, y)
+        }
+
+        // Compute accumulated cost matrix (CPU - sequential dependencies)
+        var cost = [[Float]](repeating: [Float](repeating: Float.infinity, count: nY), count: nX)
+
+        cost[0][0] = distMatrix[0][0]
+
+        for j in 1..<nY {
+            if isInWindow(0, j, nX, nY) {
+                cost[0][j] = cost[0][j - 1] + distMatrix[0][j]
+            }
+        }
+
+        for i in 1..<nX {
+            if isInWindow(i, 0, nX, nY) {
+                cost[i][0] = cost[i - 1][0] + distMatrix[i][0]
+            }
+        }
+
+        for i in 1..<nX {
+            for j in 1..<nY {
+                if isInWindow(i, j, nX, nY) {
+                    let minPrev = min(cost[i - 1][j], min(cost[i][j - 1], cost[i - 1][j - 1]))
+                    cost[i][j] = distMatrix[i][j] + minPrev
+                }
+            }
+        }
+
+        let path = backtrack(cost)
+
+        let totalDistance = cost[nX - 1][nY - 1]
+        let normalizedDistance = totalDistance / Float(path.count)
+
+        return DTWResult(
+            distance: totalDistance,
+            normalizedDistance: normalizedDistance,
+            path: path,
+            costMatrix: includeCostMatrix ? cost : nil
+        )
+    }
+
+    /// Compute DTW distance only with GPU acceleration.
+    ///
+    /// - Parameters:
+    ///   - x: First sequence.
+    ///   - y: Second sequence.
+    /// - Returns: DTW distance.
+    public func distanceAsync(
+        _ x: [[Float]],
+        _ y: [[Float]]
+    ) async -> Float {
+        let result = await alignAsync(x, y, includeCostMatrix: false)
+        return result.distance
     }
 
     /// Compute DTW distance only (more memory efficient).
@@ -551,16 +720,16 @@ extension DTW {
             metric: .euclidean,
             windowType: .none,
             windowParam: nil
-        ))
+        ), useGPU: true)
     }
 
     /// Configuration with Sakoe-Chiba band constraint.
-    public static func withSakoeChibaBand(windowSize: Int) -> DTW {
+    public static func withSakoeChibaBand(windowSize: Int, useGPU: Bool = true) -> DTW {
         DTW(config: DTWConfig(
             metric: .euclidean,
             windowType: .sakoeChiba,
             windowParam: windowSize
-        ))
+        ), useGPU: useGPU)
     }
 
     /// Configuration optimized for speech comparison.
@@ -569,6 +738,15 @@ extension DTW {
             metric: .cosine,
             windowType: .sakoeChiba,
             windowParam: 50
-        ))
+        ), useGPU: false)  // Cosine not GPU-accelerated
+    }
+
+    /// CPU-only DTW (disable GPU).
+    public static var cpuOnly: DTW {
+        DTW(config: DTWConfig(
+            metric: .euclidean,
+            windowType: .none,
+            windowParam: nil
+        ), useGPU: false)
     }
 }

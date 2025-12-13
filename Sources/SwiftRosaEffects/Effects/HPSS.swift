@@ -278,7 +278,7 @@ public struct HPSS: Sendable {
 
     // MARK: - Optimized Median Filters
 
-    /// Optimized horizontal median filter using contiguous storage and parallel processing.
+    /// Optimized horizontal median filter using vDSP_vsort with minimized allocations.
     private func medianFilterHorizontalContiguous(_ matrix: ContiguousMatrix, kernelSize: Int) -> ContiguousMatrix {
         let nFreqs = matrix.rows
         let nFrames = matrix.cols
@@ -290,23 +290,23 @@ public struct HPSS: Sendable {
         result.withUnsafeMutableBufferPointer { resultPtr in
             matrix.data.withUnsafeBufferPointer { dataPtr in
                 DispatchQueue.concurrentPerform(iterations: nFreqs) { f in
-                    // Thread-local window buffer
+                    // Thread-local window buffer - allocate once per thread
                     var window = [Float](repeating: 0, count: kernelSize)
                     let rowOffset = f * nFrames
 
-                    for t in 0..<nFrames {
-                        let tStart = max(0, t - halfKernel)
-                        let tEnd = min(nFrames, t + halfKernel + 1)
-                        let windowLen = tEnd - tStart
+                    window.withUnsafeMutableBufferPointer { windowPtr in
+                        for t in 0..<nFrames {
+                            let tStart = max(0, t - halfKernel)
+                            let tEnd = min(nFrames, t + halfKernel + 1)
+                            let windowLen = tEnd - tStart
 
-                        // Copy window from contiguous row (cache-friendly)
-                        for i in 0..<windowLen {
-                            window[i] = dataPtr[rowOffset + tStart + i]
+                            // Copy window from contiguous row (cache-friendly)
+                            memcpy(windowPtr.baseAddress!, dataPtr.baseAddress! + rowOffset + tStart, windowLen * MemoryLayout<Float>.size)
+
+                            // Sort window in place and take median
+                            vDSP_vsort(windowPtr.baseAddress!, vDSP_Length(windowLen), 1)
+                            resultPtr[rowOffset + t] = windowPtr[windowLen / 2]
                         }
-
-                        // Sort and get median
-                        vDSP_vsort(&window, vDSP_Length(windowLen), 1)  // Ascending sort
-                        resultPtr[rowOffset + t] = window[windowLen / 2]
                     }
                 }
             }
@@ -474,6 +474,137 @@ extension HPSS {
                 windowType: .hann,
                 center: true
             )
+        )
+    }
+}
+
+// MARK: - GPU Acceleration
+
+extension HPSS {
+    /// Compute separation masks using GPU acceleration.
+    ///
+    /// For large spectrograms (> 50K elements), uses Metal GPU for median filtering
+    /// and mask computation.
+    ///
+    /// - Parameter magnitude: Magnitude spectrogram.
+    /// - Returns: Harmonic and percussive masks.
+    public func separateMasksGPU(magnitude: [[Float]]) async -> HPSSMasks {
+        guard !magnitude.isEmpty && !magnitude[0].isEmpty else {
+            return HPSSMasks(harmonicMask: [], percussiveMask: [])
+        }
+
+        let nFreqs = magnitude.count
+        let nFrames = magnitude[0].count
+        let totalElements = nFreqs * nFrames
+
+        // Check if GPU should be used
+        guard MetalEngine.isAvailable &&
+              MetalEngine.shouldUseGPU(elementCount: totalElements, operationType: .general) else {
+            return separateMasks(magnitude: magnitude)
+        }
+
+        // Initialize Metal engine
+        guard let engine = try? MetalEngine() else {
+            return separateMasks(magnitude: magnitude)
+        }
+
+        // Flatten magnitude to row-major
+        var flatMag = [Float](repeating: 0, count: totalElements)
+        for f in 0..<nFreqs {
+            for t in 0..<nFrames {
+                flatMag[f * nFrames + t] = magnitude[f][t]
+            }
+        }
+
+        do {
+            // GPU median filtering
+            let harmonicEnhanced = try await engine.hpssMedianFilterHorizontal(
+                input: flatMag,
+                nFreqs: nFreqs,
+                nFrames: nFrames,
+                kernelSize: config.kernelSize.harmonic
+            )
+
+            let percussiveEnhanced = try await engine.hpssMedianFilterVertical(
+                input: flatMag,
+                nFreqs: nFreqs,
+                nFrames: nFrames,
+                kernelSize: config.kernelSize.percussive
+            )
+
+            // GPU soft mask computation
+            let (harmonicMask, percussiveMask) = try await engine.hpssSoftMask(
+                harmonicEnhanced: harmonicEnhanced,
+                percussiveEnhanced: percussiveEnhanced,
+                power: config.power,
+                margin: config.margin,
+                epsilon: 1e-10
+            )
+
+            // Unflatten to 2D arrays
+            var harmonicMask2D = [[Float]]()
+            var percussiveMask2D = [[Float]]()
+            harmonicMask2D.reserveCapacity(nFreqs)
+            percussiveMask2D.reserveCapacity(nFreqs)
+
+            for f in 0..<nFreqs {
+                let start = f * nFrames
+                harmonicMask2D.append(Array(harmonicMask[start..<(start + nFrames)]))
+                percussiveMask2D.append(Array(percussiveMask[start..<(start + nFrames)]))
+            }
+
+            return HPSSMasks(
+                harmonicMask: harmonicMask2D,
+                percussiveMask: percussiveMask2D
+            )
+        } catch {
+            // Fall back to CPU
+            return separateMasks(magnitude: magnitude)
+        }
+    }
+
+    /// Separate signal using GPU acceleration.
+    ///
+    /// - Parameter signal: Input audio signal.
+    /// - Returns: HPSSResult with harmonic, percussive, and optional residual.
+    public func separateGPU(_ signal: [Float]) async -> HPSSResult {
+        guard !signal.isEmpty else {
+            return HPSSResult(harmonic: [], percussive: [], residual: nil)
+        }
+
+        let targetLength = signal.count
+
+        // Compute STFT
+        let spectrogram = await stft.transform(signal)
+
+        // Get masks using GPU
+        let masks = await separateMasksGPU(magnitude: spectrogram.magnitude)
+
+        // Apply masks to complex spectrogram
+        let harmonicSpec = applyMask(spectrogram, mask: masks.harmonicMask)
+        let percussiveSpec = applyMask(spectrogram, mask: masks.percussiveMask)
+
+        // Reconstruct audio
+        var harmonic = await istft.transform(harmonicSpec)
+        var percussive = await istft.transform(percussiveSpec)
+
+        // Match output length to input length
+        harmonic = matchLength(harmonic, targetLength: targetLength)
+        percussive = matchLength(percussive, targetLength: targetLength)
+
+        // Compute residual if margin > 1
+        var residual: [Float]? = nil
+        if config.margin > 1.0 {
+            residual = [Float](repeating: 0, count: targetLength)
+            for i in 0..<targetLength {
+                residual![i] = signal[i] - harmonic[i] - percussive[i]
+            }
+        }
+
+        return HPSSResult(
+            harmonic: harmonic,
+            percussive: percussive,
+            residual: residual
         )
     }
 }

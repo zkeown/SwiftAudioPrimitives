@@ -534,3 +534,197 @@ extension GriffinLim {
         )
     }
 }
+
+// MARK: - GPU Acceleration
+
+extension GriffinLim {
+    /// Reconstruct audio using GPU-accelerated magnitude replacement.
+    ///
+    /// Uses Metal GPU for the magnitude replacement step within each iteration.
+    /// The STFT/ISTFT are still performed with the existing (already optimized)
+    /// implementations, but the magnitude replacement is GPU-accelerated.
+    ///
+    /// - Parameters:
+    ///   - magnitude: Magnitude spectrogram of shape (nFreqs, nFrames).
+    ///   - length: Expected output length. If nil, estimated from spectrogram.
+    /// - Returns: Reconstructed audio signal.
+    public func reconstructGPU(_ magnitude: [[Float]], length: Int? = nil) async -> [Float] {
+        await reconstructGPU(magnitude, length: length, onIteration: nil)
+    }
+
+    /// Reconstruct audio with GPU acceleration and iteration callback.
+    ///
+    /// - Parameters:
+    ///   - magnitude: Magnitude spectrogram of shape (nFreqs, nFrames).
+    ///   - length: Expected output length.
+    ///   - onIteration: Callback receiving (iteration, reconstructionError).
+    /// - Returns: Reconstructed audio signal.
+    public func reconstructGPU(
+        _ magnitude: [[Float]],
+        length: Int?,
+        onIteration: (@Sendable (Int, Float) -> Void)?
+    ) async -> [Float] {
+        guard !magnitude.isEmpty && !magnitude[0].isEmpty else { return [] }
+
+        let nFreqs = magnitude.count
+        let nFrames = magnitude[0].count
+        let totalElements = nFreqs * nFrames
+
+        // Check if GPU should be used
+        guard MetalEngine.isAvailable &&
+              MetalEngine.shouldUseGPU(elementCount: totalElements * nIter, operationType: .general) else {
+            return await reconstruct(magnitude, length: length, onIteration: onIteration)
+        }
+
+        // Initialize Metal engine
+        guard let engine = try? MetalEngine() else {
+            return await reconstruct(magnitude, length: length, onIteration: onIteration)
+        }
+
+        // Estimate output length if not provided
+        let outputLength = length ?? estimateOutputLength(nFrames: nFrames)
+
+        // Flatten magnitude for GPU
+        var flatMagnitude = [Float](repeating: 0, count: totalElements)
+        for f in 0..<nFreqs {
+            for t in 0..<nFrames {
+                flatMagnitude[f * nFrames + t] = magnitude[f][t]
+            }
+        }
+
+        // Initialize phase
+        var phase = [Float](repeating: 0, count: totalElements)
+        if randomPhaseInit {
+            for i in 0..<totalElements {
+                phase[i] = Float.random(in: -Float.pi...Float.pi)
+            }
+        }
+
+        // Working buffers
+        var currentReal = [Float](repeating: 0, count: totalElements)
+        var currentImag = [Float](repeating: 0, count: totalElements)
+        var prevReal = [Float](repeating: 0, count: totalElements)
+        var prevImag = [Float](repeating: 0, count: totalElements)
+
+        let momScale = momentum / (1.0 + momentum)
+        var bestError: Float = Float.infinity
+        var bestPhase = phase
+        var hasPrevious = false
+
+        for iter in 0..<nIter {
+            // 1. Create complex from magnitude + phase
+            for i in 0..<totalElements {
+                currentReal[i] = flatMagnitude[i] * cos(phase[i])
+                currentImag[i] = flatMagnitude[i] * sin(phase[i])
+            }
+
+            // 2. Convert to ComplexMatrix
+            var realRows = [[Float]]()
+            var imagRows = [[Float]]()
+            for f in 0..<nFreqs {
+                let start = f * nFrames
+                realRows.append(Array(currentReal[start..<(start + nFrames)]))
+                imagRows.append(Array(currentImag[start..<(start + nFrames)]))
+            }
+            let complex = ComplexMatrix(real: realRows, imag: imagRows)
+
+            // 3. ISTFT
+            let audio = await istft.transform(complex, length: outputLength)
+
+            // 4. Forward STFT
+            let reconstructed = await stft.transform(audio)
+
+            // Copy to flat buffers
+            for f in 0..<nFreqs {
+                let start = f * nFrames
+                for t in 0..<nFrames {
+                    currentReal[start + t] = reconstructed.real[f][t]
+                    currentImag[start + t] = reconstructed.imag[f][t]
+                }
+            }
+
+            // 5. Compute error (normalized to match CPU path)
+            var errorSum: Float = 0
+            var targetSum: Float = 0
+            for i in 0..<totalElements {
+                let currentMag = sqrt(currentReal[i] * currentReal[i] + currentImag[i] * currentImag[i])
+                let diff = flatMagnitude[i] - currentMag
+                errorSum += diff * diff
+                targetSum += flatMagnitude[i] * flatMagnitude[i]
+            }
+            let currentError = targetSum > 0 ? sqrt(errorSum / targetSum) : 0
+
+            // 6. GPU magnitude replacement
+            do {
+                let (newReal, newImag) = try await engine.griffinLimMagnitudeReplace(
+                    currentReal: currentReal,
+                    currentImag: currentImag,
+                    targetMagnitude: flatMagnitude,
+                    epsilon: 1e-10
+                )
+
+                // Apply momentum if not first iteration
+                if momentum > 0 && hasPrevious {
+                    for i in 0..<totalElements {
+                        currentReal[i] = newReal[i] - momScale * prevReal[i]
+                        currentImag[i] = newImag[i] - momScale * prevImag[i]
+                    }
+                } else {
+                    currentReal = newReal
+                    currentImag = newImag
+                }
+
+                // Save for next iteration's momentum
+                prevReal = newReal
+                prevImag = newImag
+                hasPrevious = true
+
+                // Extract phase
+                for i in 0..<totalElements {
+                    phase[i] = atan2(currentImag[i], currentReal[i])
+                }
+            } catch {
+                // GPU failed, fall back to CPU for this iteration
+                for i in 0..<totalElements {
+                    let mag = sqrt(currentReal[i] * currentReal[i] + currentImag[i] * currentImag[i])
+                    if mag > 1e-10 {
+                        let scale = flatMagnitude[i] / mag
+                        currentReal[i] *= scale
+                        currentImag[i] *= scale
+                    } else {
+                        currentReal[i] = flatMagnitude[i]
+                        currentImag[i] = 0
+                    }
+                    phase[i] = atan2(currentImag[i], currentReal[i])
+                }
+            }
+
+            // Track best
+            if currentError < bestError {
+                bestError = currentError
+                bestPhase = phase
+            }
+
+            if let callback = onIteration {
+                callback(iter, currentError)
+            }
+        }
+
+        // Final reconstruction with best phase
+        for i in 0..<totalElements {
+            currentReal[i] = flatMagnitude[i] * cos(bestPhase[i])
+            currentImag[i] = flatMagnitude[i] * sin(bestPhase[i])
+        }
+
+        var finalRealRows = [[Float]]()
+        var finalImagRows = [[Float]]()
+        for f in 0..<nFreqs {
+            let start = f * nFrames
+            finalRealRows.append(Array(currentReal[start..<(start + nFrames)]))
+            finalImagRows.append(Array(currentImag[start..<(start + nFrames)]))
+        }
+        let finalComplex = ComplexMatrix(real: finalRealRows, imag: finalImagRows)
+
+        return await istft.transform(finalComplex, length: outputLength)
+    }
+}

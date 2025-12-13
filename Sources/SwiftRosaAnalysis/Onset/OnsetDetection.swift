@@ -191,6 +191,8 @@ public struct OnsetDetector: Sendable {
     /// 4. Mean across frequency bands
     /// 5. Half-wave rectification
     /// 6. Center by padding with nFFT // (2 * hopLength) frames
+    ///
+    /// OPTIMIZED: Single-pass vectorized vDSP with strided access (no transpose).
     private func computeLibrosaOnset(_ signal: [Float]) async -> [Float] {
         // Compute power mel spectrogram
         let melSpec = await melSpectrogram.transform(signal)
@@ -198,60 +200,77 @@ public struct OnsetDetector: Sendable {
 
         let nMels = melSpec.count
         let nFrames = melSpec[0].count
+        let totalCount = nMels * nFrames
 
-        // Convert to log (dB) scale: 10 * log10(S + amin)
-        // This matches librosa's power_to_db with ref=1.0 (default)
-        // Note: librosa uses amin=1e-10 and top_db=80 clipping
-        let amin: Float = 1e-10
-        var logMelSpec = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: nMels)
-        for m in 0..<nMels {
-            for t in 0..<nFrames {
-                // Add small epsilon to avoid log(0)
-                let power = max(melSpec[m][t], amin)
-                logMelSpec[m][t] = 10 * log10(power)
-            }
-        }
-
-        // Apply top_db clipping (librosa default is 80 dB)
-        // Find max dB value and clip to max - 80
-        var maxDb: Float = -Float.infinity
-        for m in 0..<nMels {
-            for t in 0..<nFrames {
-                maxDb = max(maxDb, logMelSpec[m][t])
-            }
-        }
-        let minDb = maxDb - 80.0
-        for m in 0..<nMels {
-            for t in 0..<nFrames {
-                logMelSpec[m][t] = max(logMelSpec[m][t], minDb)
-            }
-        }
-
-        // Compute spectral flux: difference between consecutive frames, mean across mels
-        var rawEnvelope = [Float](repeating: 0, count: nFrames)
-
-        for t in 1..<nFrames {
-            var flux: Float = 0
+        // Flatten mel spectrogram: row-major (nMels × nFrames)
+        var flat = [Float](repeating: 0, count: totalCount)
+        flat.withUnsafeMutableBufferPointer { flatPtr in
             for m in 0..<nMels {
-                // Half-wave rectified difference in log domain
-                let diff = logMelSpec[m][t] - logMelSpec[m][t - 1]
-                flux += max(0, diff)
+                melSpec[m].withUnsafeBufferPointer { rowPtr in
+                    memcpy(flatPtr.baseAddress! + m * nFrames, rowPtr.baseAddress!, nFrames * MemoryLayout<Float>.size)
+                }
             }
-            // Mean across mel bands (librosa default aggregation)
-            rawEnvelope[t] = flux / Float(nMels)
         }
 
-        // Center the onset envelope by padding at the beginning
-        // librosa shifts by n_fft // (2 * hop_length) frames when center=True
+        // VECTORIZED log compression: entire array at once
+        var amin: Float = 1e-10
+        var maxClip: Float = Float.greatestFiniteMagnitude
+        vDSP_vclip(flat, 1, &amin, &maxClip, &flat, 1, vDSP_Length(totalCount))
+
+        var n = Int32(totalCount)
+        vvlogf(&flat, flat, &n)
+
+        var scale: Float = 10.0 / log(10.0)
+        vDSP_vsmul(flat, 1, &scale, &flat, 1, vDSP_Length(totalCount))
+
+        var maxDb: Float = 0
+        vDSP_maxv(flat, 1, &maxDb, vDSP_Length(totalCount))
+
+        var threshold = maxDb - 80.0
+        vDSP_vthr(flat, 1, &threshold, &flat, 1, vDSP_Length(totalCount))
+
+        // Spectral flux with strided access (no transpose needed)
+        var rawEnvelope = [Float](repeating: 0, count: nFrames)
+        var diff = [Float](repeating: 0, count: nMels)
+        var zero: Float = 0
+        let invNMels: Float = 1.0 / Float(nMels)
+
+        flat.withUnsafeBufferPointer { flatPtr in
+            rawEnvelope.withUnsafeMutableBufferPointer { envPtr in
+                diff.withUnsafeMutableBufferPointer { diffPtr in
+                    for t in 1..<nFrames {
+                        // Strided gather: diff[m] = flat[m*nFrames + t] - flat[m*nFrames + t-1]
+                        // Use vDSP_vsub with stride = nFrames
+                        vDSP_vsub(flatPtr.baseAddress! + (t - 1), vDSP_Stride(nFrames),
+                                  flatPtr.baseAddress! + t, vDSP_Stride(nFrames),
+                                  diffPtr.baseAddress!, 1, vDSP_Length(nMels))
+
+                        // Half-wave rectify
+                        vDSP_vthr(diffPtr.baseAddress!, 1, &zero, diffPtr.baseAddress!, 1, vDSP_Length(nMels))
+
+                        // Sum and mean
+                        var sum: Float = 0
+                        vDSP_sve(diffPtr.baseAddress!, 1, &sum, vDSP_Length(nMels))
+                        envPtr[t] = sum * invNMels
+                    }
+                }
+            }
+        }
+
+        // Center the onset envelope
         let padFrames = config.nFFT / (2 * config.hopLength)
-        var envelope = [Float](repeating: 0, count: nFrames)
-        for t in 0..<nFrames {
-            if t >= padFrames && t - padFrames < rawEnvelope.count {
-                envelope[t] = rawEnvelope[t - padFrames]
+        if padFrames > 0 && padFrames < nFrames {
+            var envelope = [Float](repeating: 0, count: nFrames)
+            let copyLen = nFrames - padFrames
+            rawEnvelope.withUnsafeBufferPointer { rawPtr in
+                envelope.withUnsafeMutableBufferPointer { envPtr in
+                    memcpy(envPtr.baseAddress! + padFrames, rawPtr.baseAddress!, copyLen * MemoryLayout<Float>.size)
+                }
             }
+            return envelope
         }
 
-        return envelope
+        return rawEnvelope
     }
 
     private func variance(_ signal: [Float]) -> Float {
@@ -291,6 +310,8 @@ public struct OnsetDetector: Sendable {
     /// Implements librosa-compatible peak picking. The envelope is normalized
     /// to [0,1] and peaks must exceed local mean + delta.
     ///
+    /// OPTIMIZED: Uses vectorized vDSP operations for normalization.
+    ///
     /// - Parameter onsetEnvelope: Onset strength envelope.
     /// - Returns: Indices of detected peaks.
     public func pickPeaks(_ onsetEnvelope: [Float]) -> [Int] {
@@ -313,46 +334,48 @@ public struct OnsetDetector: Sendable {
         let minMeaningfulOnset: Float = 1e-6
         guard maxVal > minMeaningfulOnset else { return [] }
 
-        // Normalize: shift to non-negative, then scale to [0,1]
-        // This matches librosa's onset_detect normalization
+        // VECTORIZED: Normalize to [0,1] using vDSP_vsadd and vDSP_vsmul
         var normalizedEnvelope = [Float](repeating: 0, count: n)
         let range = maxVal - minVal
         if range > minMeaningfulOnset {
-            for i in 0..<n {
-                normalizedEnvelope[i] = (onsetEnvelope[i] - minVal) / range
-            }
+            var negMin = -minVal
+            var invRange = 1.0 / range
+            // Shift: result[i] = envelope[i] - minVal
+            vDSP_vsadd(onsetEnvelope, 1, &negMin, &normalizedEnvelope, 1, vDSP_Length(n))
+            // Scale: result[i] = result[i] / range
+            vDSP_vsmul(normalizedEnvelope, 1, &invRange, &normalizedEnvelope, 1, vDSP_Length(n))
         }
 
         var lastOnset = -config.wait
 
-        for i in config.preMax..<(n - config.postMax) {
-            // Check if this is a local maximum
-            var isMax = true
-            for j in (i - config.preMax)...(i + config.postMax) {
-                if j != i && normalizedEnvelope[j] >= normalizedEnvelope[i] {
-                    isMax = false
-                    break
+        normalizedEnvelope.withUnsafeBufferPointer { normPtr in
+            for i in config.preMax..<(n - config.postMax) {
+                // Check if this is a local maximum
+                var isMax = true
+                let currentVal = normPtr[i]
+                for j in (i - config.preMax)...(i + config.postMax) {
+                    if j != i && normPtr[j] >= currentVal {
+                        isMax = false
+                        break
+                    }
                 }
-            }
 
-            guard isMax else { continue }
+                guard isMax else { continue }
 
-            // Compute local average
-            let avgStart = max(0, i - config.preAvg)
-            let avgEnd = min(n, i + config.postAvg + 1)
-            var localAvg: Float = 0
-            for j in avgStart..<avgEnd {
-                localAvg += normalizedEnvelope[j]
-            }
-            localAvg /= Float(avgEnd - avgStart)
+                // VECTORIZED: Compute local average using vDSP_meanv
+                let avgStart = max(0, i - config.preAvg)
+                let avgEnd = min(n, i + config.postAvg + 1)
+                var localAvg: Float = 0
+                vDSP_meanv(normPtr.baseAddress! + avgStart, 1, &localAvg, vDSP_Length(avgEnd - avgStart))
 
-            // Check threshold: must exceed local average + delta
-            let threshold = localAvg + config.delta
-            if normalizedEnvelope[i] >= threshold && normalizedEnvelope[i] >= config.peakThreshold {
-                // Check wait constraint
-                if i - lastOnset >= config.wait {
-                    peaks.append(i)
-                    lastOnset = i
+                // Check threshold: must exceed local average + delta
+                let threshold = localAvg + config.delta
+                if currentVal >= threshold && currentVal >= config.peakThreshold {
+                    // Check wait constraint
+                    if i - lastOnset >= config.wait {
+                        peaks.append(i)
+                        lastOnset = i
+                    }
                 }
             }
         }
