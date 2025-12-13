@@ -29,10 +29,10 @@ LIBROSA_API = {
             'griffinlim': {'implemented': True, 'swift': 'GriffinLim.reconstruct()'},
             'phase_vocoder': {'implemented': True, 'swift': 'PhaseVocoder'},
             'magphase': {'implemented': True, 'swift': 'ComplexMatrix.magnitude/.phase'},
-            'power_to_db': {'implemented': False, 'swift': None, 'priority': 'high'},
-            'db_to_power': {'implemented': False, 'swift': None, 'priority': 'high'},
-            'amplitude_to_db': {'implemented': False, 'swift': None, 'priority': 'high'},
-            'db_to_amplitude': {'implemented': False, 'swift': None, 'priority': 'high'},
+            'power_to_db': {'implemented': True, 'swift': 'Convert.powerToDb()'},
+            'db_to_power': {'implemented': True, 'swift': 'Convert.dbToPower()'},
+            'amplitude_to_db': {'implemented': True, 'swift': 'Convert.amplitudeToDb()'},
+            'db_to_amplitude': {'implemented': True, 'swift': 'Convert.dbToAmplitude()'},
             'tone': {'implemented': True, 'swift': 'Tone.generate()'},
             'chirp': {'implemented': True, 'swift': 'Chirp.generate()'},
             'clicks': {'implemented': True, 'swift': 'Clicks.generate()'},
@@ -52,7 +52,7 @@ LIBROSA_API = {
             'mfcc': {'implemented': True, 'swift': 'MFCC'},
             'chroma_stft': {'implemented': True, 'swift': 'Chromagram (method: .stft)'},
             'chroma_cqt': {'implemented': True, 'swift': 'Chromagram (method: .cqt)'},
-            'chroma_cens': {'implemented': False, 'swift': None, 'priority': 'medium'},
+            'chroma_cens': {'implemented': True, 'swift': 'Chromagram.cens()'},
             'delta': {'implemented': True, 'swift': 'Delta.compute()'},
             'rms': {'implemented': True, 'swift': 'RMSEnergy'},
             'tonnetz': {'implemented': True, 'swift': 'Tonnetz'},
@@ -79,8 +79,8 @@ LIBROSA_API = {
         'functions': {
             'onset_detect': {'implemented': True, 'swift': 'OnsetDetector.detect()'},
             'onset_strength': {'implemented': True, 'swift': 'OnsetDetector.detectStrength()'},
-            'onset_strength_multi': {'implemented': False, 'swift': None, 'priority': 'medium'},
-            'onset_backtrack': {'implemented': False, 'swift': None, 'priority': 'low'},
+            'onset_strength_multi': {'implemented': True, 'swift': 'OnsetDetector.onsetStrengthMulti()'},
+            'onset_backtrack': {'implemented': True, 'swift': 'OnsetDetector.backtrack()'},
         }
     },
     'beat': {
@@ -88,7 +88,7 @@ LIBROSA_API = {
         'functions': {
             'beat_track': {'implemented': True, 'swift': 'BeatTracker.track()'},
             'tempo': {'implemented': True, 'swift': 'BeatTracker.estimateTempo()'},
-            'plp': {'implemented': False, 'swift': None, 'priority': 'low'},
+            'plp': {'implemented': True, 'swift': 'PLP.compute()'},
         }
     },
     'decompose': {
@@ -102,21 +102,21 @@ LIBROSA_API = {
     'effects': {
         'description': 'Audio effects',
         'functions': {
-            'pitch_shift': {'implemented': False, 'swift': None, 'priority': 'high'},
-            'time_stretch': {'implemented': False, 'swift': None, 'priority': 'high', 'note': 'PhaseVocoder available'},
+            'pitch_shift': {'implemented': True, 'swift': 'PhaseVocoder.pitchShift()'},
+            'time_stretch': {'implemented': True, 'swift': 'PhaseVocoder.timeStretch()'},
             'harmonic': {'implemented': True, 'swift': 'HPSS.harmonic()'},
             'percussive': {'implemented': True, 'swift': 'HPSS.percussive()'},
-            'preemphasis': {'implemented': False, 'swift': None, 'priority': 'low'},
-            'deemphasis': {'implemented': False, 'swift': None, 'priority': 'low'},
-            'trim': {'implemented': False, 'swift': None, 'priority': 'low'},
-            'split': {'implemented': False, 'swift': None, 'priority': 'low'},
+            'preemphasis': {'implemented': True, 'swift': 'Emphasis.preemphasis()'},
+            'deemphasis': {'implemented': True, 'swift': 'Emphasis.deemphasis()'},
+            'trim': {'implemented': True, 'swift': 'Segmentation.trim()'},
+            'split': {'implemented': True, 'swift': 'Segmentation.split()'},
         }
     },
     'cqt': {
         'description': 'Constant-Q transforms',
         'functions': {
             'cqt': {'implemented': True, 'swift': 'CQT.transform()'},
-            'icqt': {'implemented': False, 'swift': None, 'priority': 'medium'},
+            'icqt': {'implemented': True, 'swift': 'ICQT.transform()'},
             'hybrid_cqt': {'implemented': True, 'swift': 'HarmonicCQT'},
             'pseudo_cqt': {'implemented': True, 'swift': 'PseudoCQT'},
             'vqt': {'implemented': True, 'swift': 'VQT'},
@@ -126,7 +126,7 @@ LIBROSA_API = {
         'description': 'Sequence alignment',
         'functions': {
             'dtw': {'implemented': True, 'swift': 'DTW'},
-            'rqa': {'implemented': False, 'swift': None, 'priority': 'low'},
+            'rqa': {'implemented': True, 'swift': 'RQA.compute()'},
         }
     },
 }

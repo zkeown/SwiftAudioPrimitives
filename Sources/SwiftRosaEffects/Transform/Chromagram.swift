@@ -422,6 +422,118 @@ extension Chromagram {
     }
 }
 
+// MARK: - CENS (Chroma Energy Normalized Statistics)
+
+extension Chromagram {
+    /// Compute Chroma Energy Normalized Statistics (CENS).
+    ///
+    /// CENS is a variant of chroma features that applies:
+    /// 1. L1 normalization per frame
+    /// 2. Quantization to discrete levels (optional)
+    /// 3. Temporal smoothing with a window function
+    /// 4. Final L2 normalization
+    ///
+    /// CENS features are robust to local tempo variations and are useful for
+    /// music retrieval, cover song identification, and audio matching.
+    ///
+    /// - Parameters:
+    ///   - signal: Input audio signal.
+    ///   - winLenSmooth: Smoothing window length in frames (default: 41).
+    ///   - quantize: Whether to apply quantization (default: true).
+    ///   - nQuant: Number of quantization levels if quantize=true (default: 4).
+    /// - Returns: CENS chromagram of shape (nChroma, nFrames).
+    ///
+    /// - Note: Matches `librosa.feature.chroma_cens(y, sr)`
+    public func cens(
+        _ signal: [Float],
+        winLenSmooth: Int = 41,
+        quantize: Bool = true,
+        nQuant: Int = 4
+    ) async -> [[Float]] {
+        // Get base chroma features
+        var chroma = await transform(signal)
+        guard !chroma.isEmpty, !chroma[0].isEmpty else { return [] }
+
+        let nChroma = chroma.count
+        let nFrames = chroma[0].count
+
+        // Step 1: L1 normalization per frame
+        for t in 0..<nFrames {
+            var sum: Float = 0
+            for c in 0..<nChroma {
+                sum += abs(chroma[c][t])
+            }
+            if sum > 1e-10 {
+                for c in 0..<nChroma {
+                    chroma[c][t] /= sum
+                }
+            }
+        }
+
+        // Step 2: Quantization (optional)
+        if quantize && nQuant > 0 {
+            // Quantize to [0, 1/nQuant, 2/nQuant, ..., 1]
+            let step = 1.0 / Float(nQuant)
+            for c in 0..<nChroma {
+                for t in 0..<nFrames {
+                    // Quantize: round to nearest step
+                    let quantized = round(chroma[c][t] / step) * step
+                    chroma[c][t] = min(1.0, max(0.0, quantized))
+                }
+            }
+        }
+
+        // Step 3: Temporal smoothing with Hann window
+        let window = generateHannWindow(length: winLenSmooth)
+        let windowSum = window.reduce(0, +)
+
+        var smoothed = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: nChroma)
+        let halfWin = winLenSmooth / 2
+
+        for c in 0..<nChroma {
+            for t in 0..<nFrames {
+                var sum: Float = 0
+                var weightSum: Float = 0
+
+                for w in 0..<winLenSmooth {
+                    let frameIdx = t - halfWin + w
+                    if frameIdx >= 0 && frameIdx < nFrames {
+                        sum += chroma[c][frameIdx] * window[w]
+                        weightSum += window[w]
+                    }
+                }
+
+                smoothed[c][t] = weightSum > 0 ? sum / weightSum : 0
+            }
+        }
+
+        // Step 4: Final L2 normalization per frame
+        for t in 0..<nFrames {
+            var sumSquares: Float = 0
+            for c in 0..<nChroma {
+                sumSquares += smoothed[c][t] * smoothed[c][t]
+            }
+            let norm = sqrt(sumSquares)
+            if norm > 1e-10 {
+                for c in 0..<nChroma {
+                    smoothed[c][t] /= norm
+                }
+            }
+        }
+
+        return smoothed
+    }
+
+    /// Generate a Hann window for smoothing.
+    private func generateHannWindow(length: Int) -> [Float] {
+        var window = [Float](repeating: 0, count: length)
+        for i in 0..<length {
+            window[i] = 0.5 * (1.0 - cos(2.0 * Float.pi * Float(i) / Float(length - 1)))
+        }
+        return window
+    }
+}
+
 // MARK: - Utility Methods
 
 extension Chromagram {

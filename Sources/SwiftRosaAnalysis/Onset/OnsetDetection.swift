@@ -521,6 +521,194 @@ public struct OnsetDetector: Sendable {
     }
 }
 
+// MARK: - Onset Backtrack
+
+extension OnsetDetector {
+    /// Backtrack onset events to find true attack points.
+    ///
+    /// Given onset frame indices detected from an onset envelope, this function
+    /// searches backward to find the point where energy begins to increase,
+    /// providing more accurate onset positions.
+    ///
+    /// - Parameters:
+    ///   - onsets: Frame indices of detected onsets.
+    ///   - energy: Energy envelope of the signal (e.g., RMS per frame).
+    /// - Returns: Adjusted onset frame indices.
+    ///
+    /// - Note: Matches `librosa.onset.onset_backtrack(events, energy)`
+    public func backtrack(onsets: [Int], energy: [Float]) -> [Int] {
+        guard !onsets.isEmpty, !energy.isEmpty else { return onsets }
+
+        var backtracked = [Int]()
+        backtracked.reserveCapacity(onsets.count)
+
+        for onset in onsets {
+            guard onset < energy.count else {
+                backtracked.append(onset)
+                continue
+            }
+
+            // Search backward from onset to find local minimum
+            var minIdx = onset
+            var minEnergy = energy[onset]
+
+            // Search backward (up to onset index samples)
+            for i in stride(from: onset - 1, through: max(0, onset - config.preAvg * 2), by: -1) {
+                if energy[i] < minEnergy {
+                    minEnergy = energy[i]
+                    minIdx = i
+                } else if energy[i] > minEnergy * 1.1 {
+                    // Stop if energy starts increasing significantly
+                    break
+                }
+            }
+
+            backtracked.append(minIdx)
+        }
+
+        return backtracked
+    }
+
+    /// Backtrack onset events using the signal's RMS energy.
+    ///
+    /// Convenience method that computes RMS energy from the signal.
+    ///
+    /// - Parameters:
+    ///   - onsets: Frame indices of detected onsets.
+    ///   - signal: Input audio signal.
+    /// - Returns: Adjusted onset frame indices.
+    public func backtrack(onsets: [Int], signal: [Float]) async -> [Int] {
+        // Compute RMS energy envelope
+        let spectrogram = await stft.transform(signal)
+        let mag = spectrogram.magnitude
+        guard !mag.isEmpty, !mag[0].isEmpty else { return onsets }
+
+        let nFreqs = mag.count
+        let nFrames = mag[0].count
+
+        var rmsEnergy = [Float](repeating: 0, count: nFrames)
+        for t in 0..<nFrames {
+            var sumSquares: Float = 0
+            for f in 0..<nFreqs {
+                sumSquares += mag[f][t] * mag[f][t]
+            }
+            rmsEnergy[t] = sqrt(sumSquares / Float(nFreqs))
+        }
+
+        return backtrack(onsets: onsets, energy: rmsEnergy)
+    }
+}
+
+// MARK: - Multi-band Onset Strength
+
+extension OnsetDetector {
+    /// Compute onset strength envelope for multiple frequency bands.
+    ///
+    /// Returns onset strength computed independently for different frequency
+    /// ranges, useful for detecting onsets at different frequency levels.
+    ///
+    /// - Parameters:
+    ///   - signal: Input audio signal.
+    ///   - channels: Optional pre-computed frequency band spectrograms.
+    ///               If nil, uses default sub-bands based on mel frequencies.
+    ///   - nBands: Number of frequency bands (default: 6, ignored if channels provided).
+    /// - Returns: Onset strength envelope per band, shape (nBands, nFrames).
+    ///
+    /// - Note: Matches `librosa.onset.onset_strength_multi(y, sr)`
+    public func onsetStrengthMulti(
+        _ signal: [Float],
+        channels: [[Float]]? = nil,
+        nBands: Int = 6
+    ) async -> [[Float]] {
+        // Compute mel spectrogram
+        let melSpec = await melSpectrogram.transform(signal)
+        guard !melSpec.isEmpty, !melSpec[0].isEmpty else { return [] }
+
+        let nMels = melSpec.count
+        let nFrames = melSpec[0].count
+
+        // If custom channels provided, use them
+        if let channels = channels {
+            return computeMultiBandOnset(channels: channels)
+        }
+
+        // Divide mel bands into sub-bands
+        let bandsPerGroup = nMels / nBands
+        var bandSpecs = [[[Float]]](repeating: [], count: nBands)
+
+        for band in 0..<nBands {
+            let startMel = band * bandsPerGroup
+            let endMel = (band == nBands - 1) ? nMels : (band + 1) * bandsPerGroup
+
+            var bandSpec = [[Float]]()
+            for m in startMel..<endMel {
+                bandSpec.append(melSpec[m])
+            }
+            bandSpecs[band] = bandSpec
+        }
+
+        // Compute onset strength for each band
+        var result = [[Float]]()
+        for bandSpec in bandSpecs {
+            let bandOnset = computeBandOnsetStrength(bandSpec)
+            result.append(bandOnset)
+        }
+
+        return result
+    }
+
+    /// Compute onset strength from a set of channels (frequency bands).
+    private func computeMultiBandOnset(channels: [[Float]]) -> [[Float]] {
+        var result = [[Float]]()
+
+        for channel in channels {
+            // Compute onset strength for this channel
+            guard !channel.isEmpty else {
+                result.append([])
+                continue
+            }
+
+            // Simple half-wave rectified difference
+            var onset = [Float](repeating: 0, count: channel.count)
+            for i in 1..<channel.count {
+                onset[i] = max(0, channel[i] - channel[i - 1])
+            }
+            result.append(onset)
+        }
+
+        return result
+    }
+
+    /// Compute onset strength for a single frequency band spectrogram.
+    private func computeBandOnsetStrength(_ bandSpec: [[Float]]) -> [Float] {
+        guard !bandSpec.isEmpty, !bandSpec[0].isEmpty else { return [] }
+
+        let nMels = bandSpec.count
+        let nFrames = bandSpec[0].count
+
+        // Convert to log scale
+        let amin: Float = 1e-10
+        var logSpec = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: nMels)
+        for m in 0..<nMels {
+            for t in 0..<nFrames {
+                logSpec[m][t] = 10 * log10(max(bandSpec[m][t], amin))
+            }
+        }
+
+        // Compute spectral flux (mean of half-wave rectified differences)
+        var onset = [Float](repeating: 0, count: nFrames)
+        for t in 1..<nFrames {
+            var flux: Float = 0
+            for m in 0..<nMels {
+                flux += max(0, logSpec[m][t] - logSpec[m][t - 1])
+            }
+            onset[t] = flux / Float(nMels)
+        }
+
+        return onset
+    }
+}
+
 // MARK: - Presets
 
 extension OnsetDetector {
