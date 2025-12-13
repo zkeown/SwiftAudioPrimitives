@@ -225,6 +225,9 @@ public actor MetalEngine {
         let frameCount = frames.count
         let frameLength = frames[0].count
 
+        // Guard against zero-length frames to prevent thread dispatch issues
+        guard frameLength > 0, frameCount > 0, outputLength > 0 else { return [] }
+
         // Flatten frames for GPU transfer
         let flatFrames = frames.flatMap { $0 }
 
@@ -275,11 +278,12 @@ public actor MetalEngine {
         encoder.setBytes(&frameLengthVar, length: MemoryLayout<UInt32>.size, index: 4)
         encoder.setBytes(&hopLengthVar, length: MemoryLayout<UInt32>.size, index: 5)
 
-        // Dispatch threads
-        let threadsPerGroup = MTLSize(width: min(frameLength, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+        // Dispatch threads (ensure minimum of 1 thread per dimension to avoid underflow)
+        let threadsWidth = max(1, min(frameLength, pipeline.maxTotalThreadsPerThreadgroup))
+        let threadsPerGroup = MTLSize(width: threadsWidth, height: 1, depth: 1)
         let threadGroups = MTLSize(
-            width: (frameLength + threadsPerGroup.width - 1) / threadsPerGroup.width,
-            height: frameCount,
+            width: max(1, (frameLength + threadsPerGroup.width - 1) / threadsPerGroup.width),
+            height: max(1, frameCount),
             depth: 1
         )
 

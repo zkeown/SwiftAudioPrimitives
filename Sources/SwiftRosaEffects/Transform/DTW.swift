@@ -5,10 +5,14 @@ import Foundation
 // MARK: - GPU Acceleration Support
 
 /// Internal helper for GPU-accelerated distance matrix computation.
+/// Uses a singleton pattern to avoid creating multiple MetalEngine instances.
 private actor DTWMetalHelper {
+    /// Shared singleton instance to avoid GPU resource leaks.
+    static let shared = DTWMetalHelper()
+
     private var engine: MetalEngine?
 
-    init() {
+    private init() {
         if MetalEngine.isAvailable {
             self.engine = try? MetalEngine()
         }
@@ -269,8 +273,7 @@ public struct DTW: Sendable {
                 }
             }
 
-            let helper = DTWMetalHelper()
-            if let flatDist = try? await helper.computeDistanceMatrix(
+            if let flatDist = try? await DTWMetalHelper.shared.computeDistanceMatrix(
                 xFeatures: xFlat,
                 yFeatures: yFlat,
                 nFeatures: nFeatures,

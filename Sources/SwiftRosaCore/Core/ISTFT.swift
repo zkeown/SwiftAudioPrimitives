@@ -5,6 +5,16 @@ import Foundation
 ///
 /// Uses Metal GPU acceleration for large spectrograms and optimized
 /// vDSP operations for CPU fallback.
+///
+/// ## Precision Considerations
+///
+/// By default, ISTFT uses Float32 accumulation for overlap-add, which provides
+/// good performance but has approximately 1e-5 reconstruction error. For
+/// applications requiring higher precision (e.g., lossless audio reconstruction),
+/// set `config.precision = .float64` to use Float64 accumulation with ~1e-6 error.
+///
+/// The precision difference is due to accumulated rounding errors in the
+/// overlap-add process where many frame values are summed together.
 public struct ISTFT: Sendable {
     public let config: STFTConfig
 

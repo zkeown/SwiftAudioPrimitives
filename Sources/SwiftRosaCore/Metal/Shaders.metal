@@ -8,6 +8,24 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// MARK: - Atomic Float Helpers
+
+/// Atomic add for float using compare-and-swap.
+/// This provides portable atomic float support across all Metal versions.
+inline void atomicAddFloat(device atomic_uint* addr, float value) {
+    uint expected = atomic_load_explicit(addr, memory_order_relaxed);
+    while (true) {
+        float current = as_type<float>(expected);
+        float newVal = current + value;
+        uint newBits = as_type<uint>(newVal);
+        if (atomic_compare_exchange_weak_explicit(addr, &expected, newBits,
+                                                   memory_order_relaxed,
+                                                   memory_order_relaxed)) {
+            break;
+        }
+    }
+}
+
 // MARK: - Overlap-Add Kernel
 
 /// Overlap-add kernel for ISTFT reconstruction.
@@ -25,7 +43,7 @@ using namespace metal;
 kernel void overlapAdd(
     device const float* frames [[buffer(0)]],
     device const float* window [[buffer(1)]],
-    device atomic_float* output [[buffer(2)]],
+    device atomic_uint* output [[buffer(2)]],
     constant uint& frameCount [[buffer(3)]],
     constant uint& frameLength [[buffer(4)]],
     constant uint& hopLength [[buffer(5)]],
@@ -48,7 +66,7 @@ kernel void overlapAdd(
     float windowedValue = frameValue * windowValue;
 
     // Accumulate to output (atomic for thread safety)
-    atomic_fetch_add_explicit(&output[outputIdx], windowedValue, memory_order_relaxed);
+    atomicAddFloat(&output[outputIdx], windowedValue);
 }
 
 /// Overlap-add with squared window normalization accumulation.
@@ -57,8 +75,8 @@ kernel void overlapAdd(
 kernel void overlapAddWithNorm(
     device const float* frames [[buffer(0)]],
     device const float* window [[buffer(1)]],
-    device atomic_float* output [[buffer(2)]],
-    device atomic_float* windowSum [[buffer(3)]],
+    device atomic_uint* output [[buffer(2)]],
+    device atomic_uint* windowSum [[buffer(3)]],
     constant uint& frameCount [[buffer(4)]],
     constant uint& frameLength [[buffer(5)]],
     constant uint& hopLength [[buffer(6)]],
@@ -78,8 +96,8 @@ kernel void overlapAddWithNorm(
     float windowedValue = frameValue * windowValue;
     float windowSquared = windowValue * windowValue;
 
-    atomic_fetch_add_explicit(&output[outputIdx], windowedValue, memory_order_relaxed);
-    atomic_fetch_add_explicit(&windowSum[outputIdx], windowSquared, memory_order_relaxed);
+    atomicAddFloat(&output[outputIdx], windowedValue);
+    atomicAddFloat(&windowSum[outputIdx], windowSquared);
 }
 
 // MARK: - Mel Filterbank Application
@@ -675,7 +693,7 @@ kernel void nmfUpdateH(
 kernel void nmfReconstructionError(
     device const float* V [[buffer(0)]],
     device const float* WH [[buffer(1)]],
-    device atomic_float* error [[buffer(2)]],
+    device atomic_uint* error [[buffer(2)]],
     constant uint& count [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
@@ -685,7 +703,7 @@ kernel void nmfReconstructionError(
 
     float diff = V[gid] - WH[gid];
     float diffSq = diff * diff;
-    atomic_fetch_add_explicit(error, diffSq, memory_order_relaxed);
+    atomicAddFloat(error, diffSq);
 }
 
 /// Element-wise maximum with zero (ReLU / non-negativity constraint).
@@ -1063,8 +1081,8 @@ kernel void cqtCorrelation(
     for (uint i = 0; i < filterLen; i++) {
         int sigIdx = startIdx + int(i);
 
-        // Bounds check
-        if (sigIdx >= 0 && uint(sigIdx) < signalLength) {
+        // Bounds check (compare as signed to handle negative sigIdx correctly)
+        if (sigIdx >= 0 && sigIdx < int(signalLength)) {
             float sigVal = signal[sigIdx];
             // Correlation with conjugate: signal * (re - j*im)
             sumReal += sigVal * filterReal[filterOffset + i];
@@ -1136,7 +1154,8 @@ kernel void cqtCorrelationBatch(
 
     for (uint i = 0; i < filterLen; i++) {
         int sigIdx = startIdx + int(i);
-        if (sigIdx >= 0 && uint(sigIdx) < signalLength) {
+        // Bounds check (compare as signed to handle negative sigIdx correctly)
+        if (sigIdx >= 0 && sigIdx < int(signalLength)) {
             float sigVal = signal[sigIdx];
             sumReal += sigVal * filterReal[filterOffset + i];
             sumImag -= sigVal * filterImag[filterOffset + i];
@@ -1201,8 +1220,13 @@ kernel void hpssMedianFilterHorizontal(
         values[j] = val;
     }
 
-    // Median
-    float median = values[count / 2];
+    // Median (handle even-length arrays correctly)
+    float median;
+    if (count % 2 == 0) {
+        median = (values[count / 2 - 1] + values[count / 2]) / 2.0f;
+    } else {
+        median = values[count / 2];
+    }
 
     output[freqIdx * nFrames + frameIdx] = median;
 }
@@ -1247,7 +1271,13 @@ kernel void hpssMedianFilterVertical(
         values[j] = val;
     }
 
-    float median = values[count / 2];
+    // Median (handle even-length arrays correctly)
+    float median;
+    if (count % 2 == 0) {
+        median = (values[count / 2 - 1] + values[count / 2]) / 2.0f;
+    } else {
+        median = values[count / 2];
+    }
 
     output[freqIdx * nFrames + frameIdx] = median;
 }

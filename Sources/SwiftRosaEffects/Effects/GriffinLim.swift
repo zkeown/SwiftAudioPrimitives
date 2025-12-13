@@ -643,14 +643,16 @@ extension GriffinLim {
                 }
             }
 
-            // 5. Compute error
+            // 5. Compute error (normalized to match CPU path)
             var errorSum: Float = 0
+            var targetSum: Float = 0
             for i in 0..<totalElements {
                 let currentMag = sqrt(currentReal[i] * currentReal[i] + currentImag[i] * currentImag[i])
                 let diff = flatMagnitude[i] - currentMag
                 errorSum += diff * diff
+                targetSum += flatMagnitude[i] * flatMagnitude[i]
             }
-            let currentError = sqrt(errorSum)
+            let currentError = targetSum > 0 ? sqrt(errorSum / targetSum) : 0
 
             // 6. GPU magnitude replacement
             do {
