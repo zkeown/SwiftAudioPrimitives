@@ -1,0 +1,35 @@
+{
+  "name": "bidirectional",
+  "input_size": 4,
+  "hidden_size": 8,
+  "batch_size": 1,
+  "seq_len": 5,
+  "bidirectional": true,
+  "num_directions": 2,
+  "pytorch_version": "2.9.1",
+  "numpy_version": "2.3.5",
+  "seed": 42,
+  "weight_ih_shape": [
+    24,
+    4
+  ],
+  "weight_hh_shape": [
+    24,
+    8
+  ],
+  "input_shape": [
+    1,
+    5,
+    4
+  ],
+  "output_shape": [
+    1,
+    5,
+    16
+  ],
+  "hidden_shape": [
+    2,
+    1,
+    8
+  ]
+}

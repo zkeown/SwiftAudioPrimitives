@@ -124,6 +124,135 @@ kernel void lstm_add_gates(
     output[gid] = a[gid] + b[gid];
 }
 
+// MARK: - GRU Kernels
+
+/// Fused GRU state update kernel.
+///
+/// Computes the GRU state update from separate input and hidden gate pre-activations.
+/// The separation is required because the "new" gate uses the reset gate to modulate
+/// only the hidden-to-hidden contribution:
+///
+///   r = sigmoid(gates_ih[0:H] + gates_hh[0:H])           // reset gate
+///   z = sigmoid(gates_ih[H:2H] + gates_hh[H:2H])         // update gate
+///   n = tanh(gates_ih[2H:3H] + r * gates_hh[2H:3H])      // new gate (reset modulates hh only)
+///   h_new = (1 - z) * n + z * h_prev
+///
+/// Parameters:
+/// - gates_ih: Input-to-hidden gate pre-activations [batchSize, 3*hiddenSize]
+///             (W_ih @ x + bias_ih)
+/// - gates_hh: Hidden-to-hidden gate pre-activations [batchSize, 3*hiddenSize]
+///             (W_hh @ h_prev + bias_hh)
+/// - h_prev: Previous hidden state [batchSize, hiddenSize]
+/// - h_out: Output hidden state [batchSize, hiddenSize]
+/// - hiddenSize: Size of hidden dimension
+/// - batchSize: Batch size
+kernel void gru_state_update(
+    device const float* gates_ih [[buffer(0)]],
+    device const float* gates_hh [[buffer(1)]],
+    device const float* h_prev [[buffer(2)]],
+    device float* h_out [[buffer(3)]],
+    constant uint& hiddenSize [[buffer(4)]],
+    constant uint& batchSize [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint hiddenIdx = gid.x;
+    uint batchIdx = gid.y;
+
+    if (hiddenIdx >= hiddenSize || batchIdx >= batchSize) {
+        return;
+    }
+
+    uint H = hiddenSize;
+    uint gateOffset = batchIdx * (3 * H);
+    uint stateOffset = batchIdx * H + hiddenIdx;
+
+    // Read gate pre-activations (gates order: r, z, n)
+    // Reset gate: sum of ih and hh contributions
+    float r_ih = gates_ih[gateOffset + hiddenIdx];
+    float r_hh = gates_hh[gateOffset + hiddenIdx];
+
+    // Update gate: sum of ih and hh contributions
+    float z_ih = gates_ih[gateOffset + H + hiddenIdx];
+    float z_hh = gates_hh[gateOffset + H + hiddenIdx];
+
+    // New gate: ih contribution and hh contribution (kept separate for reset modulation)
+    float n_ih = gates_ih[gateOffset + 2 * H + hiddenIdx];
+    float n_hh = gates_hh[gateOffset + 2 * H + hiddenIdx];
+
+    // Compute reset gate: r = sigmoid(r_ih + r_hh)
+    float r = 1.0f / (1.0f + exp(-(r_ih + r_hh)));
+
+    // Compute update gate: z = sigmoid(z_ih + z_hh)
+    float z = 1.0f / (1.0f + exp(-(z_ih + z_hh)));
+
+    // Compute new gate: n = tanh(n_ih + r * n_hh)
+    // Note: reset gate modulates only the hidden-to-hidden contribution
+    float n = tanh(n_ih + r * n_hh);
+
+    // State update: h_new = (1 - z) * n + z * h_prev
+    float h_prev_val = h_prev[stateOffset];
+    float h_new = (1.0f - z) * n + z * h_prev_val;
+
+    // Write output
+    h_out[stateOffset] = h_new;
+}
+
+/// Add GRU biases to gate pre-activations (input-to-hidden path).
+///
+/// Computes: gates_ih += bias_ih
+/// This is separated to allow MPS to handle the matmuls.
+///
+/// Parameters:
+/// - gates_ih: Gate pre-activations [batchSize, 3*hiddenSize], modified in-place
+/// - bias_ih: Input-to-hidden bias [3*hiddenSize]
+/// - gateSize: 3 * hiddenSize
+/// - batchSize: Batch size
+kernel void gru_add_bias_ih(
+    device float* gates_ih [[buffer(0)]],
+    device const float* bias_ih [[buffer(1)]],
+    constant uint& gateSize [[buffer(2)]],
+    constant uint& batchSize [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint gateIdx = gid.x;
+    uint batchIdx = gid.y;
+
+    if (gateIdx >= gateSize || batchIdx >= batchSize) {
+        return;
+    }
+
+    uint offset = batchIdx * gateSize + gateIdx;
+    gates_ih[offset] += bias_ih[gateIdx];
+}
+
+/// Add GRU biases to gate pre-activations (hidden-to-hidden path).
+///
+/// Computes: gates_hh += bias_hh
+/// This is separated to allow MPS to handle the matmuls.
+///
+/// Parameters:
+/// - gates_hh: Gate pre-activations [batchSize, 3*hiddenSize], modified in-place
+/// - bias_hh: Hidden-to-hidden bias [3*hiddenSize]
+/// - gateSize: 3 * hiddenSize
+/// - batchSize: Batch size
+kernel void gru_add_bias_hh(
+    device float* gates_hh [[buffer(0)]],
+    device const float* bias_hh [[buffer(1)]],
+    constant uint& gateSize [[buffer(2)]],
+    constant uint& batchSize [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint gateIdx = gid.x;
+    uint batchIdx = gid.y;
+
+    if (gateIdx >= gateSize || batchIdx >= batchSize) {
+        return;
+    }
+
+    uint offset = batchIdx * gateSize + gateIdx;
+    gates_hh[offset] += bias_hh[gateIdx];
+}
+
 // MARK: - Sequence Operations
 
 /// Reverse sequence along time dimension.

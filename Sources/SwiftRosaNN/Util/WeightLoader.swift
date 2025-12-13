@@ -219,4 +219,122 @@ public struct WeightLoader {
         let data = weights.withUnsafeBytes { Data($0) }
         try data.write(to: url)
     }
+
+    // MARK: - GRU Weight Loading
+
+    /// Load complete GRU weights from a directory.
+    ///
+    /// Expects files named according to PyTorch convention:
+    /// - `weight_ih_l{layer}.bin` - Input-to-hidden weights
+    /// - `weight_hh_l{layer}.bin` - Hidden-to-hidden weights
+    /// - `bias_ih_l{layer}.bin` (if config.bias is true)
+    /// - `bias_hh_l{layer}.bin` (if config.bias is true)
+    /// - `weight_ih_l{layer}_reverse.bin` (if bidirectional)
+    /// - etc.
+    ///
+    /// GRU weights have shape [3*hiddenSize, inputSize] for input-to-hidden
+    /// and [3*hiddenSize, hiddenSize] for hidden-to-hidden (3 gates: reset, update, new).
+    ///
+    /// - Parameters:
+    ///   - directory: Directory containing weight files.
+    ///   - config: GRU configuration.
+    /// - Returns: Complete GRUWeights.
+    /// - Throws: `WeightLoadError` if files are missing or have wrong sizes.
+    public static func loadGRUWeights(
+        from directory: URL,
+        config: GRUConfig
+    ) throws -> GRUWeights {
+        var forwardWeights: [GRULayerWeights] = []
+        var backwardWeights: [GRULayerWeights]? = config.bidirectional ? [] : nil
+
+        for layer in 0..<config.numLayers {
+            // Determine input size for this layer
+            // Layer 0 uses config.inputSize
+            // Subsequent layers use previous layer's output size
+            let layerInputSize: Int
+            if layer == 0 {
+                layerInputSize = config.inputSize
+            } else {
+                // Previous layer output: hiddenSize * numDirections
+                layerInputSize = config.bidirectional ? config.hiddenSize * 2 : config.hiddenSize
+            }
+
+            // Load forward direction
+            let fwdWeights = try loadGRULayerWeights(
+                from: directory,
+                layer: layer,
+                inputSize: layerInputSize,
+                hiddenSize: config.hiddenSize,
+                hasBias: config.bias,
+                reverse: false
+            )
+            forwardWeights.append(fwdWeights)
+
+            // Load backward direction if bidirectional
+            if config.bidirectional {
+                let bwdWeights = try loadGRULayerWeights(
+                    from: directory,
+                    layer: layer,
+                    inputSize: layerInputSize,
+                    hiddenSize: config.hiddenSize,
+                    hasBias: config.bias,
+                    reverse: true
+                )
+                backwardWeights?.append(bwdWeights)
+            }
+        }
+
+        return GRUWeights(forward: forwardWeights, backward: backwardWeights, config: config)
+    }
+
+    /// Load weights for a single GRU layer direction.
+    private static func loadGRULayerWeights(
+        from directory: URL,
+        layer: Int,
+        inputSize: Int,
+        hiddenSize: Int,
+        hasBias: Bool,
+        reverse: Bool
+    ) throws -> GRULayerWeights {
+        let suffix = reverse ? "_reverse" : ""
+
+        let weightIHURL = directory.appendingPathComponent("weight_ih_l\(layer)\(suffix).bin")
+        let weightHHURL = directory.appendingPathComponent("weight_hh_l\(layer)\(suffix).bin")
+
+        let weightIH = try loadRawFloats(
+            from: weightIHURL,
+            expectedCount: 3 * hiddenSize * inputSize
+        )
+
+        let weightHH = try loadRawFloats(
+            from: weightHHURL,
+            expectedCount: 3 * hiddenSize * hiddenSize
+        )
+
+        var biasIH: [Float]? = nil
+        var biasHH: [Float]? = nil
+
+        if hasBias {
+            let biasIHURL = directory.appendingPathComponent("bias_ih_l\(layer)\(suffix).bin")
+            let biasHHURL = directory.appendingPathComponent("bias_hh_l\(layer)\(suffix).bin")
+
+            biasIH = try loadRawFloats(
+                from: biasIHURL,
+                expectedCount: 3 * hiddenSize
+            )
+            biasHH = try loadRawFloats(
+                from: biasHHURL,
+                expectedCount: 3 * hiddenSize
+            )
+        }
+
+        return GRULayerWeights(
+            weightIH: weightIH,
+            weightHH: weightHH,
+            biasIH: biasIH,
+            biasHH: biasHH,
+            inputSize: inputSize,
+            hiddenSize: hiddenSize
+        )
+    }
 }

@@ -471,6 +471,266 @@ public actor LSTMEngine {
         return (hOut, cOut)
     }
 
+    // MARK: - GRU Cell Forward
+
+    /// Perform single GRU cell forward pass.
+    ///
+    /// Computes one timestep of GRU:
+    /// 1. Gate activations: gates_ih = W_ih @ x + bias_ih, gates_hh = W_hh @ h_prev + bias_hh
+    /// 2. State update: h_new = gru_update(gates_ih, gates_hh, h_prev)
+    ///
+    /// Note: GRU keeps gates_ih and gates_hh separate because the "new" gate computation
+    /// requires the reset gate to modulate only the hidden-to-hidden contribution:
+    ///   r = sigmoid(gates_ih[0:H] + gates_hh[0:H])
+    ///   z = sigmoid(gates_ih[H:2H] + gates_hh[H:2H])
+    ///   n = tanh(gates_ih[2H:3H] + r * gates_hh[2H:3H])
+    ///   h_new = (1-z) * n + z * h_prev
+    ///
+    /// - Parameters:
+    ///   - input: Input at this timestep [batchSize, inputSize].
+    ///   - hPrev: Previous hidden state [batchSize, hiddenSize].
+    ///   - weightIH: Input-to-hidden weight matrix (MPS).
+    ///   - weightHH: Hidden-to-hidden weight matrix (MPS).
+    ///   - biasIH: Input-to-hidden bias [3*hiddenSize], or nil.
+    ///   - biasHH: Hidden-to-hidden bias [3*hiddenSize], or nil.
+    ///   - batchSize: Batch dimension.
+    ///   - inputSize: Input feature dimension.
+    ///   - hiddenSize: Hidden state dimension.
+    /// - Returns: New hidden state.
+    public func gruCellForward(
+        input: [Float],
+        hPrev: [Float],
+        weightIH: MPSMatrix,
+        weightHH: MPSMatrix,
+        biasIH: [Float]?,
+        biasHH: [Float]?,
+        batchSize: Int,
+        inputSize: Int,
+        hiddenSize: Int
+    ) async throws -> [Float] {
+        let gateSize = 3 * hiddenSize
+
+        // Calculate buffer sizes
+        let inputBytes = batchSize * inputSize * MemoryLayout<Float>.stride
+        let hPrevBytes = batchSize * hiddenSize * MemoryLayout<Float>.stride
+        let gatesBytes = batchSize * gateSize * MemoryLayout<Float>.stride
+
+        // Acquire buffers
+        guard let inputBuffer = bufferPool.acquire(minBytes: inputBytes),
+              let hPrevBuffer = bufferPool.acquire(minBytes: hPrevBytes),
+              let gatesIHBuffer = bufferPool.acquire(minBytes: gatesBytes),
+              let gatesHHBuffer = bufferPool.acquire(minBytes: gatesBytes),
+              let hOutBuffer = bufferPool.acquire(minBytes: hPrevBytes)
+        else {
+            throw LSTMEngineError.bufferCreationFailed
+        }
+
+        defer {
+            bufferPool.release(inputBuffer)
+            bufferPool.release(hPrevBuffer)
+            bufferPool.release(gatesIHBuffer)
+            bufferPool.release(gatesHHBuffer)
+            bufferPool.release(hOutBuffer)
+        }
+
+        // Copy input data
+        memcpy(inputBuffer.contents(), input, input.count * MemoryLayout<Float>.stride)
+        memcpy(hPrevBuffer.contents(), hPrev, hPrev.count * MemoryLayout<Float>.stride)
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw LSTMEngineError.commandBufferFailed
+        }
+
+        // Create MPS matrices for inputs
+        let inputMatrix = MPSMatrix(
+            buffer: inputBuffer,
+            descriptor: MPSMatrixDescriptor(
+                rows: batchSize,
+                columns: inputSize,
+                rowBytes: inputSize * MemoryLayout<Float>.stride,
+                dataType: .float32
+            )
+        )
+
+        let hPrevMatrix = MPSMatrix(
+            buffer: hPrevBuffer,
+            descriptor: MPSMatrixDescriptor(
+                rows: batchSize,
+                columns: hiddenSize,
+                rowBytes: hiddenSize * MemoryLayout<Float>.stride,
+                dataType: .float32
+            )
+        )
+
+        let gatesIHMatrix = MPSMatrix(
+            buffer: gatesIHBuffer,
+            descriptor: MPSMatrixDescriptor(
+                rows: batchSize,
+                columns: gateSize,
+                rowBytes: gateSize * MemoryLayout<Float>.stride,
+                dataType: .float32
+            )
+        )
+
+        let gatesHHMatrix = MPSMatrix(
+            buffer: gatesHHBuffer,
+            descriptor: MPSMatrixDescriptor(
+                rows: batchSize,
+                columns: gateSize,
+                rowBytes: gateSize * MemoryLayout<Float>.stride,
+                dataType: .float32
+            )
+        )
+
+        // MPS matmul: gatesIH = input @ W_ih^T
+        let matmulIH = MPSMatrixMultiplication(
+            device: device,
+            transposeLeft: false,
+            transposeRight: true,
+            resultRows: batchSize,
+            resultColumns: gateSize,
+            interiorColumns: inputSize,
+            alpha: 1.0,
+            beta: 0.0
+        )
+        matmulIH.encode(
+            commandBuffer: commandBuffer,
+            leftMatrix: inputMatrix,
+            rightMatrix: weightIH,
+            resultMatrix: gatesIHMatrix
+        )
+
+        // MPS matmul: gatesHH = hPrev @ W_hh^T
+        let matmulHH = MPSMatrixMultiplication(
+            device: device,
+            transposeLeft: false,
+            transposeRight: true,
+            resultRows: batchSize,
+            resultColumns: gateSize,
+            interiorColumns: hiddenSize,
+            alpha: 1.0,
+            beta: 0.0
+        )
+        matmulHH.encode(
+            commandBuffer: commandBuffer,
+            leftMatrix: hPrevMatrix,
+            rightMatrix: weightHH,
+            resultMatrix: gatesHHMatrix
+        )
+
+        // Add biases if present (to separate buffers)
+        // Acquire bias buffers upfront and use defer for consistent cleanup pattern
+        var biasIHBuffer: MTLBuffer?
+        var biasHHBuffer: MTLBuffer?
+
+        if biasIH != nil {
+            biasIHBuffer = bufferPool.acquire(minBytes: gateSize * MemoryLayout<Float>.stride)
+            guard biasIHBuffer != nil else {
+                throw LSTMEngineError.bufferCreationFailed
+            }
+        }
+        if biasHH != nil {
+            biasHHBuffer = bufferPool.acquire(minBytes: gateSize * MemoryLayout<Float>.stride)
+            guard biasHHBuffer != nil else {
+                if let buffer = biasIHBuffer { bufferPool.release(buffer) }
+                throw LSTMEngineError.bufferCreationFailed
+            }
+        }
+
+        defer {
+            if let buffer = biasIHBuffer { bufferPool.release(buffer) }
+            if let buffer = biasHHBuffer { bufferPool.release(buffer) }
+        }
+
+        if let biasIH = biasIH, let buffer = biasIHBuffer {
+            memcpy(buffer.contents(), biasIH, biasIH.count * MemoryLayout<Float>.stride)
+
+            let biasPipeline = try getPipeline(for: "gru_add_bias_ih")
+            guard let biasEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                throw LSTMEngineError.encodingFailed
+            }
+
+            var gateSizeVar = UInt32(gateSize)
+            var batchSizeVar = UInt32(batchSize)
+
+            biasEncoder.setComputePipelineState(biasPipeline)
+            biasEncoder.setBuffer(gatesIHBuffer, offset: 0, index: 0)
+            biasEncoder.setBuffer(buffer, offset: 0, index: 1)
+            biasEncoder.setBytes(&gateSizeVar, length: MemoryLayout<UInt32>.size, index: 2)
+            biasEncoder.setBytes(&batchSizeVar, length: MemoryLayout<UInt32>.size, index: 3)
+
+            let biasThreadsPerGroup = MTLSize(width: 32, height: 8, depth: 1)
+            let biasGroups = MTLSize(
+                width: (gateSize + biasThreadsPerGroup.width - 1) / biasThreadsPerGroup.width,
+                height: (batchSize + biasThreadsPerGroup.height - 1) / biasThreadsPerGroup.height,
+                depth: 1
+            )
+            biasEncoder.dispatchThreadgroups(biasGroups, threadsPerThreadgroup: biasThreadsPerGroup)
+            biasEncoder.endEncoding()
+        }
+
+        if let biasHH = biasHH, let buffer = biasHHBuffer {
+            memcpy(buffer.contents(), biasHH, biasHH.count * MemoryLayout<Float>.stride)
+
+            let biasPipeline = try getPipeline(for: "gru_add_bias_hh")
+            guard let biasEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                throw LSTMEngineError.encodingFailed
+            }
+
+            var gateSizeVar = UInt32(gateSize)
+            var batchSizeVar = UInt32(batchSize)
+
+            biasEncoder.setComputePipelineState(biasPipeline)
+            biasEncoder.setBuffer(gatesHHBuffer, offset: 0, index: 0)
+            biasEncoder.setBuffer(buffer, offset: 0, index: 1)
+            biasEncoder.setBytes(&gateSizeVar, length: MemoryLayout<UInt32>.size, index: 2)
+            biasEncoder.setBytes(&batchSizeVar, length: MemoryLayout<UInt32>.size, index: 3)
+
+            let biasThreadsPerGroup = MTLSize(width: 32, height: 8, depth: 1)
+            let biasGroups = MTLSize(
+                width: (gateSize + biasThreadsPerGroup.width - 1) / biasThreadsPerGroup.width,
+                height: (batchSize + biasThreadsPerGroup.height - 1) / biasThreadsPerGroup.height,
+                depth: 1
+            )
+            biasEncoder.dispatchThreadgroups(biasGroups, threadsPerThreadgroup: biasThreadsPerGroup)
+            biasEncoder.endEncoding()
+        }
+
+        // GRU state update kernel
+        let updatePipeline = try getPipeline(for: "gru_state_update")
+        guard let updateEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw LSTMEngineError.encodingFailed
+        }
+
+        var hiddenSizeVar = UInt32(hiddenSize)
+        var batchSizeVar = UInt32(batchSize)
+
+        updateEncoder.setComputePipelineState(updatePipeline)
+        updateEncoder.setBuffer(gatesIHBuffer, offset: 0, index: 0)
+        updateEncoder.setBuffer(gatesHHBuffer, offset: 0, index: 1)
+        updateEncoder.setBuffer(hPrevBuffer, offset: 0, index: 2)
+        updateEncoder.setBuffer(hOutBuffer, offset: 0, index: 3)
+        updateEncoder.setBytes(&hiddenSizeVar, length: MemoryLayout<UInt32>.size, index: 4)
+        updateEncoder.setBytes(&batchSizeVar, length: MemoryLayout<UInt32>.size, index: 5)
+
+        let updateThreadsPerGroup = MTLSize(width: 32, height: 8, depth: 1)
+        let updateGroups = MTLSize(
+            width: (hiddenSize + updateThreadsPerGroup.width - 1) / updateThreadsPerGroup.width,
+            height: (batchSize + updateThreadsPerGroup.height - 1) / updateThreadsPerGroup.height,
+            depth: 1
+        )
+        updateEncoder.dispatchThreadgroups(updateGroups, threadsPerThreadgroup: updateThreadsPerGroup)
+        updateEncoder.endEncoding()
+
+        // Execute
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        // Read result
+        let hOutPtr = hOutBuffer.contents().assumingMemoryBound(to: Float.self)
+        return Array(UnsafeBufferPointer(start: hOutPtr, count: batchSize * hiddenSize))
+    }
+
     // MARK: - Sequence Operations
 
     /// Reverse a sequence along the time dimension.
