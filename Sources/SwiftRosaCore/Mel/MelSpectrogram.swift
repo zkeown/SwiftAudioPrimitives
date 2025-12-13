@@ -46,8 +46,9 @@ public struct MelSpectrogram: Sendable {
     ///   - nMels: Number of mel bands (default: 128).
     ///   - fMin: Minimum frequency (default: 0).
     ///   - fMax: Maximum frequency (default: sampleRate/2).
-    ///   - htk: Use HTK mel formula (default: false).
-    ///   - norm: Mel normalization (default: .slaney).
+    ///   - htk: Use HTK mel formula (default: false). Ignored if style is .kaldi.
+    ///   - norm: Mel normalization (default: .slaney). Ignored if style is .kaldi.
+    ///   - style: Mel filterbank style (default: .slaney). Use .kaldi for PaSST compatibility.
     ///   - useGPU: Prefer GPU acceleration when available (default: true).
     public init(
         sampleRate: Float = 22050,
@@ -62,6 +63,7 @@ public struct MelSpectrogram: Sendable {
         fMax: Float? = nil,
         htk: Bool = false,
         norm: MelNorm? = .slaney,
+        style: MelStyle = .slaney,
         useGPU: Bool = true
     ) {
         self.sampleRate = sampleRate
@@ -84,7 +86,8 @@ public struct MelSpectrogram: Sendable {
             fMin: fMin,
             fMax: fMax,
             htk: htk,
-            norm: norm
+            norm: norm,
+            style: style
         )
 
         self.filters = melFilterbank.filters()
