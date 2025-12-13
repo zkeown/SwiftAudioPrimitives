@@ -21,6 +21,9 @@ public struct MelSpectrogram: Sendable {
     /// Pre-flattened filterbank for vDSP_mmul: (nMels × nFreqs) row-major.
     private let flatFilters: [Float]
 
+    /// Sparse filterbank for efficient CPU computation.
+    private let sparseFilters: SparseMelFilterbank
+
     /// Number of frequency bins.
     private let nFreqs: Int
 
@@ -39,7 +42,7 @@ public struct MelSpectrogram: Sendable {
     ///   - winLength: Window length (default: nFFT).
     ///   - windowType: Window function (default: hann).
     ///   - center: Pad signal for centered frames (default: true).
-    ///   - padMode: Padding mode (default: reflect).
+    ///   - padMode: Padding mode (default: constant/zero, matching librosa).
     ///   - nMels: Number of mel bands (default: 128).
     ///   - fMin: Minimum frequency (default: 0).
     ///   - fMax: Maximum frequency (default: sampleRate/2).
@@ -53,7 +56,7 @@ public struct MelSpectrogram: Sendable {
         winLength: Int? = nil,
         windowType: WindowType = .hann,
         center: Bool = true,
-        padMode: PadMode = .reflect,
+        padMode: PadMode = .constant(0),
         nMels: Int = 128,
         fMin: Float = 0,
         fMax: Float? = nil,
@@ -95,6 +98,9 @@ public struct MelSpectrogram: Sendable {
             }
         }
         self.flatFilters = flat
+
+        // Create sparse filterbank for efficient CPU computation
+        self.sparseFilters = melFilterbank.sparseFilters()
 
         // Initialize Metal engine if GPU is preferred and available
         if useGPU && MetalEngine.isAvailable {
@@ -168,12 +174,10 @@ public struct MelSpectrogram: Sendable {
         return applyFilterbankCPU(powerSpec)
     }
 
-    /// Apply mel filterbank using optimized vDSP matrix multiplication.
+    /// Apply mel filterbank using sparse representation for efficient computation.
     ///
-    /// Matrix multiply: melSpec = filters × powerSpec
-    /// - filters: (nMels × nFreqs) row-major
-    /// - powerSpec: (nFreqs × nFrames) row-major
-    /// - result: (nMels × nFrames) row-major
+    /// Since mel filters are triangular with ~95% zeros, we only compute
+    /// over the non-zero range of each filter, reducing operations significantly.
     private func applyFilterbankCPU(_ powerSpec: [[Float]]) -> [[Float]] {
         guard !powerSpec.isEmpty, let firstRow = powerSpec.first, !firstRow.isEmpty else {
             return []
@@ -181,48 +185,59 @@ public struct MelSpectrogram: Sendable {
 
         let nFrames = firstRow.count
         let specNFreqs = powerSpec.count
-        let nMels = filters.count
+        let nMels = sparseFilters.nMels
 
-        // Flatten power spectrogram to row-major: (nFreqs × nFrames)
-        // Use memcpy for each row instead of element-by-element copy
-        var flatPower = [Float](repeating: 0, count: specNFreqs * nFrames)
-        flatPower.withUnsafeMutableBufferPointer { flatPtr in
-            for f in 0..<specNFreqs {
-                let row = powerSpec[f]
-                let copyLen = min(nFrames, row.count)
-                row.withUnsafeBufferPointer { rowPtr in
-                    memcpy(flatPtr.baseAddress! + f * nFrames, rowPtr.baseAddress!, copyLen * MemoryLayout<Float>.size)
-                }
-            }
-        }
-
-        // Output: (nMels × nFrames) row-major
-        var flatResult = [Float](repeating: 0, count: nMels * nFrames)
-
-        // Matrix multiply: C = A × B
-        // A: (nMels × nFreqs), B: (nFreqs × nFrames), C: (nMels × nFrames)
-        // Note: vDSP_mmul expects row-major storage
-        flatFilters.withUnsafeBufferPointer { filterPtr in
-            flatPower.withUnsafeBufferPointer { powerPtr in
-                flatResult.withUnsafeMutableBufferPointer { resultPtr in
-                    vDSP_mmul(
-                        filterPtr.baseAddress!, 1,  // A
-                        powerPtr.baseAddress!, 1,   // B
-                        resultPtr.baseAddress!, 1,  // C
-                        vDSP_Length(nMels),         // M (rows of A, rows of C)
-                        vDSP_Length(nFrames),       // N (cols of B, cols of C)
-                        vDSP_Length(nFreqs)         // K (cols of A, rows of B)
-                    )
-                }
-            }
-        }
-
-        // Reshape to [[Float]] using Array slicing (faster than element copy)
+        // Output: (nMels × nFrames)
         var melSpec = [[Float]]()
         melSpec.reserveCapacity(nMels)
+
+        // Process each mel band using sparse filter
         for m in 0..<nMels {
-            let start = m * nFrames
-            melSpec.append(Array(flatResult[start..<(start + nFrames)]))
+            var output = [Float](repeating: 0, count: nFrames)
+
+            let freqStart = sparseFilters.startIndices[m]
+            let freqEnd = sparseFilters.endIndices[m]
+            let filterOffset = sparseFilters.offsets[m]
+
+            // Clamp to actual spectrogram size
+            let clampedStart = min(freqStart, specNFreqs)
+            let clampedEnd = min(freqEnd, specNFreqs)
+
+            guard clampedStart < clampedEnd && clampedStart < specNFreqs else {
+                melSpec.append(output)
+                continue
+            }
+
+            // Compute weighted sum over non-zero filter range
+            sparseFilters.values.withUnsafeBufferPointer { filterValuesPtr in
+                output.withUnsafeMutableBufferPointer { outputPtr in
+                    // For each frequency bin in the sparse filter range
+                    for k in clampedStart..<clampedEnd {
+                        let filterIdx = filterOffset + (k - freqStart)
+
+                        // Safety bounds check
+                        guard filterIdx >= 0 && filterIdx < sparseFilters.values.count else { continue }
+                        guard k < specNFreqs else { continue }
+
+                        let filterVal = filterValuesPtr[filterIdx]
+
+                        // Add weighted contribution: output += filterVal * powerSpec[k]
+                        powerSpec[k].withUnsafeBufferPointer { specPtr in
+                            // vDSP_vsma: D = A * B + C (scalar multiply-add)
+                            var scale = filterVal
+                            vDSP_vsma(
+                                specPtr.baseAddress!, 1,
+                                &scale,
+                                outputPtr.baseAddress!, 1,
+                                outputPtr.baseAddress!, 1,
+                                vDSP_Length(min(nFrames, specPtr.count))
+                            )
+                        }
+                    }
+                }
+            }
+
+            melSpec.append(output)
         }
 
         return melSpec

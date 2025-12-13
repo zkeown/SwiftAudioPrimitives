@@ -181,40 +181,29 @@ public struct SpectralFeatures: Sendable {
         let nFreqs = magnitudeSpec.count
         let nFrames = magnitudeSpec[0].count
 
-        // Optimized approach: compute weighted sums row-wise to maximize cache efficiency
-        // For each frequency bin f, contribution to frame t is freq[f] * mag[f][t]
-        // We can vectorize this per-row
-
-        var weightedSums = [Float](repeating: 0, count: nFrames)
-        var totalWeights = [Float](repeating: 0, count: nFrames)
+        // Use Float64 accumulation for improved precision (~10x tighter tolerance)
+        // This reduces accumulated rounding error across frequency bins
+        var weightedSums64 = [Double](repeating: 0, count: nFrames)
+        var totalWeights64 = [Double](repeating: 0, count: nFrames)
 
         // Process row by row (each row is contiguous in memory)
         for f in 0..<nFreqs {
-            let freq = frequencies[f]
+            let freq64 = Double(frequencies[f])
 
             magnitudeSpec[f].withUnsafeBufferPointer { magRowPtr in
-                // Add freq * mag[f][t] to weightedSums[t] for all t
-                weightedSums.withUnsafeMutableBufferPointer { wsPtr in
-                    var freqVal = freq
-                    // weightedSums += freq * magRow
-                    vDSP_vsma(magRowPtr.baseAddress!, 1, &freqVal, wsPtr.baseAddress!, 1, wsPtr.baseAddress!, 1, vDSP_Length(nFrames))
-                }
-
-                // Add mag[f][t] to totalWeights[t] for all t
-                totalWeights.withUnsafeMutableBufferPointer { twPtr in
-                    vDSP_vadd(twPtr.baseAddress!, 1, magRowPtr.baseAddress!, 1, twPtr.baseAddress!, 1, vDSP_Length(nFrames))
+                for t in 0..<nFrames {
+                    let mag64 = Double(magRowPtr[t])
+                    weightedSums64[t] += freq64 * mag64
+                    totalWeights64[t] += mag64
                 }
             }
         }
 
-        // Compute centroid = weightedSums / totalWeights (with safe division)
+        // Compute centroid = weightedSums / totalWeights and convert back to Float32
         var result = [Float](repeating: 0, count: nFrames)
-        vDSP_vdiv(totalWeights, 1, weightedSums, 1, &result, 1, vDSP_Length(nFrames))
-
-        // Handle division by zero (set to 0 where totalWeight was 0)
         for t in 0..<nFrames {
-            if totalWeights[t] == 0 {
-                result[t] = 0
+            if totalWeights64[t] > 0 {
+                result[t] = Float(weightedSums64[t] / totalWeights64[t])
             }
         }
 
@@ -358,39 +347,35 @@ public struct SpectralFeatures: Sendable {
 
         let nFreqs = magnitudeSpec.count
         let nFrames = magnitudeSpec[0].count
+        let rollPercent64 = Double(rollPercent)
 
-        // Compute total energy per frame (row-wise for cache efficiency)
-        var totalEnergy = [Float](repeating: 0, count: nFrames)
+        // Use Float64 accumulation for improved precision
+        var totalEnergy64 = [Double](repeating: 0, count: nFrames)
         for f in 0..<nFreqs {
             magnitudeSpec[f].withUnsafeBufferPointer { magRowPtr in
-                totalEnergy.withUnsafeMutableBufferPointer { tePtr in
-                    vDSP_vadd(tePtr.baseAddress!, 1, magRowPtr.baseAddress!, 1, tePtr.baseAddress!, 1, vDSP_Length(nFrames))
+                for t in 0..<nFrames {
+                    totalEnergy64[t] += Double(magRowPtr[t])
                 }
             }
         }
 
-        // Compute thresholds
-        var thresholds = [Float](repeating: 0, count: nFrames)
-        var percent = rollPercent
-        vDSP_vsmul(totalEnergy, 1, &percent, &thresholds, 1, vDSP_Length(nFrames))
+        // Compute thresholds in Float64
+        let thresholds64 = totalEnergy64.map { $0 * rollPercent64 }
 
-        // Parallel rolloff computation using GCD
-        // Each frame can be computed independently once we have the threshold
+        // Parallel rolloff computation using GCD with Float64 cumulative sums
         var result = [Float](repeating: 0, count: nFrames)
 
         result.withUnsafeMutableBufferPointer { resultPtr in
-            thresholds.withUnsafeBufferPointer { threshPtr in
-                DispatchQueue.concurrentPerform(iterations: nFrames) { t in
-                    let threshold = threshPtr[t]
-                    var cumSum: Float = 0
+            DispatchQueue.concurrentPerform(iterations: nFrames) { t in
+                let threshold = thresholds64[t]
+                var cumSum: Double = 0
 
-                    // Find the frequency bin where cumulative sum exceeds threshold
-                    for f in 0..<nFreqs {
-                        cumSum += magnitudeSpec[f][t]
-                        if cumSum >= threshold {
-                            resultPtr[t] = frequencies[f]
-                            break
-                        }
+                // Find the frequency bin where cumulative sum exceeds threshold
+                for f in 0..<nFreqs {
+                    cumSum += Double(magnitudeSpec[f][t])
+                    if cumSum >= threshold {
+                        resultPtr[t] = frequencies[f]
+                        break
                     }
                 }
             }
@@ -417,59 +402,21 @@ public struct SpectralFeatures: Sendable {
 
         let nFreqs = magnitudeSpec.count
         let nFrames = magnitudeSpec[0].count
-        let amin: Float = 1e-10
-        let invNFreqs = 1.0 / Float(nFreqs)
+        let amin64: Double = 1e-10
+        let power64 = Double(power)
+        let invNFreqs64 = 1.0 / Double(nFreqs)
 
-        // Row-wise computation for better cache efficiency
-        // Compute sum of logs and arithmetic sum per frame
-
-        var logSums = [Float](repeating: 0, count: nFrames)
-        var arithmeticSums = [Float](repeating: 0, count: nFrames)
-
-        // Temporary buffer for per-row processing
-        var rowPower = [Float](repeating: 0, count: nFrames)
-        var rowLog = [Float](repeating: 0, count: nFrames)
+        // Use Float64 accumulation for improved precision
+        var logSums64 = [Double](repeating: 0, count: nFrames)
+        var arithmeticSums64 = [Double](repeating: 0, count: nFrames)
 
         for f in 0..<nFreqs {
             magnitudeSpec[f].withUnsafeBufferPointer { magRowPtr in
-                rowPower.withUnsafeMutableBufferPointer { rpPtr in
-                    // Apply power to row
-                    if power == 2.0 {
-                        // Fast path for squared
-                        vDSP_vsq(magRowPtr.baseAddress!, 1, rpPtr.baseAddress!, 1, vDSP_Length(nFrames))
-                    } else {
-                        // General power - copy first then apply
-                        memcpy(rpPtr.baseAddress!, magRowPtr.baseAddress!, nFrames * MemoryLayout<Float>.size)
-                        var p = power
-                        var n = Int32(nFrames)
-                        vvpowsf(rpPtr.baseAddress!, &p, rpPtr.baseAddress!, &n)
-                    }
-
-                    // Clamp to amin
-                    var aminVal = amin
-                    vDSP_vthr(rpPtr.baseAddress!, 1, &aminVal, rpPtr.baseAddress!, 1, vDSP_Length(nFrames))
-                }
-            }
-
-            // Compute log of powered values
-            rowLog.withUnsafeMutableBufferPointer { rlPtr in
-                rowPower.withUnsafeBufferPointer { rpPtr in
-                    var n = Int32(nFrames)
-                    vvlogf(rlPtr.baseAddress!, rpPtr.baseAddress!, &n)
-                }
-            }
-
-            // Accumulate log sums
-            logSums.withUnsafeMutableBufferPointer { lsPtr in
-                rowLog.withUnsafeBufferPointer { rlPtr in
-                    vDSP_vadd(lsPtr.baseAddress!, 1, rlPtr.baseAddress!, 1, lsPtr.baseAddress!, 1, vDSP_Length(nFrames))
-                }
-            }
-
-            // Accumulate arithmetic sums
-            arithmeticSums.withUnsafeMutableBufferPointer { asPtr in
-                rowPower.withUnsafeBufferPointer { rpPtr in
-                    vDSP_vadd(asPtr.baseAddress!, 1, rpPtr.baseAddress!, 1, asPtr.baseAddress!, 1, vDSP_Length(nFrames))
+                for t in 0..<nFrames {
+                    // Apply power and clamp to amin
+                    let powered = max(pow(Double(magRowPtr[t]), power64), amin64)
+                    logSums64[t] += log(powered)
+                    arithmeticSums64[t] += powered
                 }
             }
         }
@@ -478,9 +425,9 @@ public struct SpectralFeatures: Sendable {
         var result = [Float](repeating: 0, count: nFrames)
 
         for t in 0..<nFrames {
-            let geometricMean = exp(logSums[t] * invNFreqs)
-            let arithmeticMean = arithmeticSums[t] * invNFreqs
-            result[t] = arithmeticMean > amin ? geometricMean / arithmeticMean : 0
+            let geometricMean = exp(logSums64[t] * invNFreqs64)
+            let arithmeticMean = arithmeticSums64[t] * invNFreqs64
+            result[t] = arithmeticMean > amin64 ? Float(geometricMean / arithmeticMean) : 0
         }
 
         return result

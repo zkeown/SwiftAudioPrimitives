@@ -91,27 +91,37 @@ public struct CQTConfig: Sendable {
     }
 }
 
+/// Pre-computed CQT filter for one frequency bin.
+private struct CQTFilter: Sendable {
+    let centerFreq: Float
+    let filterLength: Int
+    let realPart: [Float]  // cos component (windowed)
+    let imagPart: [Float]  // sin component (windowed)
+    let l1Norm: Float      // For normalization
+}
+
 /// Parameters for processing a single octave in the multi-resolution CQT.
-private struct OctaveParams {
+private struct OctaveParams: Sendable {
     let octave: Int
     let nBins: Int              // Number of bins in this octave
     let binOffset: Int          // Offset in output array
     let effectiveSR: Float      // Sample rate at this octave (after downsampling)
-    let fftSize: Int            // FFT size for this octave
     let hopLength: Int          // Hop length at this octave
-    let filterBank: [[Float]]   // Frequency-domain filters: [bin][real, imag interleaved]
+    let downsampleFactor: Int   // Total downsampling factor for this octave
+    let filters: [CQTFilter]    // Time-domain filters for this octave
 }
 
-/// Constant-Q Transform with FFT-based multi-resolution algorithm.
+/// Constant-Q Transform with multi-resolution time-domain correlation.
 ///
 /// The Constant-Q Transform (CQT) is a time-frequency representation where
 /// frequency bins are geometrically spaced (constant Q-factor), making it
 /// ideal for music analysis where pitch relationships are logarithmic.
 ///
-/// This implementation uses librosa's multi-resolution FFT approach:
+/// This implementation uses direct time-domain correlation with multi-rate processing:
 /// - Process octaves from highest to lowest frequency
-/// - Use FFT-based convolution (O(N log N) per octave)
+/// - Use direct correlation (inner product) with windowed sinusoid filters
 /// - Downsample signal by 2 between octaves
+/// - L1 normalization to match librosa's default norm=1
 ///
 /// ## Example Usage
 ///
@@ -128,11 +138,8 @@ public struct CQT: Sendable {
     /// Configuration.
     public let config: CQTConfig
 
-    /// Pre-computed octave parameters including frequency-domain filter banks.
+    /// Pre-computed octave parameters including time-domain filters.
     private let octaveParams: [OctaveParams]
-
-    /// FFT setups for each octave size.
-    private let fftSetups: [Int: FFTSetupWrapper]
 
     /// Create a CQT processor.
     ///
@@ -142,13 +149,16 @@ public struct CQT: Sendable {
 
         // Compute parameters for each octave
         var params = [OctaveParams]()
-        var setups = [Int: FFTSetupWrapper]()
 
         let nOctaves = config.nOctaves
         var effectiveSR = config.sampleRate
         var hopLength = config.hopLength
+        var downsampleFactor = 1  // Track cumulative downsampling
 
         // Process octaves from highest (last) to lowest (first)
+        // This determines the effective SR for each octave
+        // We iterate in reverse so that effectiveSR starts at full sample rate
+        // for the highest octave and decreases for lower octaves
         for octaveIdx in (0..<nOctaves).reversed() {
             let binStart = octaveIdx * config.binsPerOctave
             let binEnd = min(binStart + config.binsPerOctave, config.nBins)
@@ -156,31 +166,17 @@ public struct CQT: Sendable {
 
             if nBinsInOctave <= 0 { continue }
 
-            // Find the longest filter needed for this octave (lowest frequency bin)
-            let lowestFreq = config.centerFrequency(forBin: binStart)
-            let filterLength = Int(ceil(config.Q * effectiveSR / lowestFreq))
-
-            // FFT size must be power of 2 and accommodate the filter
-            let fftSize = Self.nextPowerOfTwo(max(filterLength, 64))
-
-            // Create FFT setup if not exists
-            if setups[fftSize] == nil {
-                let log2n = vDSP_Length(log2(Double(fftSize)))
-                setups[fftSize] = FFTSetupWrapper(log2n: log2n)
-            }
-
-            // Create frequency-domain filter bank for this octave
-            var filterBank = [[Float]]()
+            // Create time-domain filters for this octave
+            var filters = [CQTFilter]()
             for bin in binStart..<binEnd {
                 let centerFreq = config.centerFrequency(forBin: bin)
-                let filter = Self.createFrequencyDomainFilter(
+                let filter = Self.createTimeDomainFilter(
                     centerFreq: centerFreq,
                     Q: config.Q,
                     effectiveSR: effectiveSR,
-                    fftSize: fftSize,
                     windowType: config.windowType
                 )
-                filterBank.append(filter)
+                filters.append(filter)
             }
 
             params.append(OctaveParams(
@@ -188,19 +184,20 @@ public struct CQT: Sendable {
                 nBins: nBinsInOctave,
                 binOffset: binStart,
                 effectiveSR: effectiveSR,
-                fftSize: fftSize,
                 hopLength: hopLength,
-                filterBank: filterBank
+                downsampleFactor: downsampleFactor,
+                filters: filters
             ))
 
             // Downsample for next (lower frequency) octave
             effectiveSR /= 2
-            hopLength /= 2
+            hopLength = max(1, hopLength / 2)
+            downsampleFactor *= 2
         }
 
-        // Reverse to process from highest to lowest
-        self.octaveParams = params.reversed()
-        self.fftSetups = setups
+        // params is now ordered [octave6, octave5, ..., octave0] which is the
+        // correct processing order (highest freq first, then downsample)
+        self.octaveParams = params
     }
 
     /// Compute CQT of signal.
@@ -223,17 +220,10 @@ public struct CQT: Sendable {
         var currentSignal = signal
 
         for octave in octaveParams {
-            guard let fftSetup = fftSetups[octave.fftSize] else { continue }
-
-            // Pad signal for this octave
-            let padLength = octave.fftSize / 2
-            let paddedSignal = padSignal(currentSignal, padLength: padLength)
-
-            // Compute CQT for this octave using FFT-based convolution
+            // Process this octave
             processOctave(
                 octave: octave,
-                paddedSignal: paddedSignal,
-                fftSetup: fftSetup,
+                signal: currentSignal,
                 nFrames: nFrames,
                 realOutput: &realOutput,
                 imagOutput: &imagOutput
@@ -270,238 +260,185 @@ public struct CQT: Sendable {
 
     // MARK: - Private Implementation
 
-    /// Process one octave using FFT-based convolution.
+    /// Create time-domain filter for one CQT bin.
+    ///
+    /// Creates a windowed complex sinusoid at the center frequency,
+    /// normalized by L1 norm to match librosa's default norm=1.
+    private static func createTimeDomainFilter(
+        centerFreq: Float,
+        Q: Float,
+        effectiveSR: Float,
+        windowType: WindowType
+    ) -> CQTFilter {
+        // Filter length based on Q factor
+        let filterLength = Int(ceil(Q * effectiveSR / centerFreq))
+
+        // Generate window
+        let window = Windows.generate(windowType, length: filterLength, periodic: false)
+
+        // Generate windowed complex sinusoid
+        var realPart = [Float](repeating: 0, count: filterLength)
+        var imagPart = [Float](repeating: 0, count: filterLength)
+
+        let phaseIncrement = 2.0 * Float.pi * centerFreq / effectiveSR
+        var l1Norm: Float = 0
+
+        for i in 0..<filterLength {
+            let phase = phaseIncrement * Float(i)
+            let windowVal = window[i]
+            realPart[i] = windowVal * cos(phase)
+            imagPart[i] = windowVal * sin(phase)
+            // L1 norm of complex values: sum of |z| = sum of sqrt(re^2 + im^2)
+            // For unit-amplitude sinusoid with window: sum of |window|
+            l1Norm += windowVal
+        }
+
+        return CQTFilter(
+            centerFreq: centerFreq,
+            filterLength: filterLength,
+            realPart: realPart,
+            imagPart: imagPart,
+            l1Norm: l1Norm
+        )
+    }
+
+    /// Process one octave using direct time-domain correlation.
     private func processOctave(
         octave: OctaveParams,
-        paddedSignal: [Float],
-        fftSetup: FFTSetupWrapper,
+        signal: [Float],
         nFrames: Int,
         realOutput: inout [[Float]],
         imagOutput: inout [[Float]]
     ) {
-        let fftSize = octave.fftSize
-        let halfN = fftSize / 2
-        let log2n = vDSP_Length(log2(Double(fftSize)))
+        guard !signal.isEmpty else { return }
+
+        // Find the longest filter in this octave (for padding calculation)
+        let maxFilterLen = octave.filters.map { $0.filterLength }.max() ?? 0
+        guard maxFilterLen > 0 else { return }
+
+        // Pad signal for centered frames
+        let padLen = maxFilterLen / 2
+        var paddedSignal = [Float](repeating: 0, count: padLen)
+        paddedSignal.append(contentsOf: signal)
+        paddedSignal.append(contentsOf: [Float](repeating: 0, count: padLen))
 
         // Calculate frames at this octave's sample rate
-        let octaveFrames = (paddedSignal.count - fftSize) / octave.hopLength + 1
-        guard octaveFrames > 0 else { return }
+        let octaveFrames = max(1, (signal.count + octave.hopLength - 1) / octave.hopLength)
 
-        // Compute frame scale factor (octave frame index -> output frame index)
+        // Frame scale factor (octave frame index -> output frame index)
         let frameScale = Float(nFrames) / Float(octaveFrames)
 
-        // Allocate working buffers
-        var windowedFrame = [Float](repeating: 0, count: fftSize)
-        var splitReal = [Float](repeating: 0, count: halfN)
-        var splitImag = [Float](repeating: 0, count: halfN)
-        var productReal = [Float](repeating: 0, count: halfN)
-        var productImag = [Float](repeating: 0, count: halfN)
+        // Process each frame
+        for octaveFrame in 0..<octaveFrames {
+            // Map to output frame
+            let outFrame = min(Int(Float(octaveFrame) * frameScale), nFrames - 1)
 
-        // Generate window
-        let window = Windows.generate(config.windowType, length: fftSize, periodic: true)
+            // Frame center position in padded signal
+            let frameCenter = padLen + octaveFrame * octave.hopLength
 
-        paddedSignal.withUnsafeBufferPointer { signalPtr in
-            for octaveFrame in 0..<octaveFrames {
-                let start = octaveFrame * octave.hopLength
+            // Apply each filter
+            for (binIdx, filter) in octave.filters.enumerated() {
+                let globalBin = octave.binOffset + binIdx
 
-                // Window the frame
-                vDSP_vmul(
-                    signalPtr.baseAddress! + start, 1,
-                    window, 1,
-                    &windowedFrame, 1,
-                    vDSP_Length(fftSize)
-                )
+                // Correlation: inner product of signal with conjugate of filter
+                // CQT = sum(signal * conj(filter)) = sum(signal * (re - j*im))
+                //     = sum(signal * re) - j * sum(signal * im)
+                let halfLen = filter.filterLength / 2
+                let startIdx = frameCenter - halfLen
 
-                // FFT
-                var split = DSPSplitComplex(realp: &splitReal, imagp: &splitImag)
-                windowedFrame.withUnsafeBufferPointer { framePtr in
-                    vDSP_ctoz(
-                        UnsafePointer<DSPComplex>(OpaquePointer(framePtr.baseAddress!)),
-                        2,
-                        &split,
-                        1,
-                        vDSP_Length(halfN)
-                    )
-                }
+                var sumReal: Float = 0
+                var sumImag: Float = 0
 
-                vDSP_fft_zrip(fftSetup.setup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
+                // Bounds check
+                let actualStart = max(0, startIdx)
+                let actualEnd = min(paddedSignal.count, startIdx + filter.filterLength)
 
-                // Scale by 0.5 (vDSP convention)
-                var scale: Float = 0.5
-                vDSP_vsmul(splitReal, 1, &scale, &splitReal, 1, vDSP_Length(halfN))
-                vDSP_vsmul(splitImag, 1, &scale, &splitImag, 1, vDSP_Length(halfN))
-
-                // Map to output frame
-                let outFrame = min(Int(Float(octaveFrame) * frameScale), nFrames - 1)
-
-                // Apply each frequency-domain filter
-                for (binIdx, filter) in octave.filterBank.enumerated() {
-                    let globalBin = octave.binOffset + binIdx
-
-                    // Complex multiply: (a+bi)(c+di) = (ac-bd) + (ad+bc)i
-                    // Filter is stored as [real0, imag0, real1, imag1, ...]
-                    var sumReal: Float = 0
-                    var sumImag: Float = 0
-
-                    for k in 0..<halfN {
-                        let filterReal = filter[2 * k]
-                        let filterImag = filter[2 * k + 1]
-                        let sigReal = splitReal[k]
-                        let sigImag = splitImag[k]
-
-                        // Complex multiply and accumulate
-                        sumReal += sigReal * filterReal - sigImag * filterImag
-                        sumImag += sigReal * filterImag + sigImag * filterReal
+                if actualEnd > actualStart {
+                    for i in actualStart..<actualEnd {
+                        let filterIdx = i - startIdx
+                        if filterIdx >= 0 && filterIdx < filter.filterLength {
+                            let sigVal = paddedSignal[i]
+                            // Correlation with conjugate: (re - j*im)
+                            sumReal += sigVal * filter.realPart[filterIdx]
+                            sumImag -= sigVal * filter.imagPart[filterIdx]  // Conjugate
+                        }
                     }
-
-                    // Also include DC and Nyquist (packed in special format)
-                    // DC is at real[0], Nyquist is at imag[0] in packed format
-
-                    realOutput[globalBin][outFrame] = sumReal
-                    imagOutput[globalBin][outFrame] = sumImag
                 }
+
+                // Normalize to match librosa's norm=1 output
+                // librosa formula: CQT = correlation * sqrt(filterLength) * sqrt(downsampleFactor) / L1_norm
+                // The sqrt(downsampleFactor) compensates for energy spreading when downsampling
+                // This gives energy-independent normalization across different filter lengths and octaves
+                if filter.l1Norm > 0 {
+                    let sqrtLen = sqrt(Float(filter.filterLength))
+                    let sqrtDS = sqrt(Float(octave.downsampleFactor))
+                    sumReal = sumReal * sqrtLen * sqrtDS / filter.l1Norm
+                    sumImag = sumImag * sqrtLen * sqrtDS / filter.l1Norm
+                }
+
+                realOutput[globalBin][outFrame] = sumReal
+                imagOutput[globalBin][outFrame] = sumImag
             }
         }
     }
 
-    /// Create frequency-domain filter for one CQT bin.
-    private static func createFrequencyDomainFilter(
-        centerFreq: Float,
-        Q: Float,
-        effectiveSR: Float,
-        fftSize: Int,
-        windowType: WindowType
-    ) -> [Float] {
-        let halfN = fftSize / 2
-
-        // Time-domain filter length
-        let filterLength = Int(ceil(Q * effectiveSR / centerFreq))
-        let actualLength = min(filterLength, fftSize)
-
-        // Generate windowed complex sinusoid in time domain
-        let window = Windows.generate(windowType, length: actualLength, periodic: true)
-
-        let phaseIncrement = 2.0 * Float.pi * centerFreq / effectiveSR
-        var realKernel = [Float](repeating: 0, count: fftSize)
-        var imagKernel = [Float](repeating: 0, count: fftSize)
-
-        // Generate windowed sinusoid centered in the frame
-        let offset = (fftSize - actualLength) / 2
-        for i in 0..<actualLength {
-            let phase = phaseIncrement * Float(i)
-            realKernel[offset + i] = window[i] * cos(phase)
-            imagKernel[offset + i] = window[i] * sin(phase)
-        }
-
-        // Compute L1 norm for normalization
-        var l1Norm: Float = 0
-        for i in 0..<fftSize {
-            l1Norm += sqrt(realKernel[i] * realKernel[i] + imagKernel[i] * imagKernel[i])
-        }
-
-        // Normalize by L1 norm and scale by sqrt(filterLength)
-        let sqrtN = sqrt(Float(filterLength))
-        let normFactor = l1Norm > 0 ? sqrtN / l1Norm : 0
-
-        for i in 0..<fftSize {
-            realKernel[i] *= normFactor
-            imagKernel[i] *= -normFactor  // Conjugate for correlation
-        }
-
-        // FFT to get frequency-domain filter
-        let log2n = vDSP_Length(log2(Double(fftSize)))
-        let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))!
-        defer { vDSP_destroy_fftsetup(fftSetup) }
-
-        var splitReal = [Float](repeating: 0, count: halfN)
-        var splitImag = [Float](repeating: 0, count: halfN)
-        var split = DSPSplitComplex(realp: &splitReal, imagp: &splitImag)
-
-        // Pack real kernel
-        realKernel.withUnsafeBufferPointer { ptr in
-            vDSP_ctoz(
-                UnsafePointer<DSPComplex>(OpaquePointer(ptr.baseAddress!)),
-                2,
-                &split,
-                1,
-                vDSP_Length(halfN)
-            )
-        }
-
-        vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
-
-        // Pack imaginary kernel and FFT it
-        var imagSplitReal = [Float](repeating: 0, count: halfN)
-        var imagSplitImag = [Float](repeating: 0, count: halfN)
-        var imagSplit = DSPSplitComplex(realp: &imagSplitReal, imagp: &imagSplitImag)
-
-        imagKernel.withUnsafeBufferPointer { ptr in
-            vDSP_ctoz(
-                UnsafePointer<DSPComplex>(OpaquePointer(ptr.baseAddress!)),
-                2,
-                &imagSplit,
-                1,
-                vDSP_Length(halfN)
-            )
-        }
-
-        vDSP_fft_zrip(fftSetup, &imagSplit, 1, log2n, FFTDirection(kFFTDirection_Forward))
-
-        // Combine into complex filter: filter_freq = FFT(real_kernel) + j*FFT(imag_kernel)
-        // Store interleaved for efficient access
-        var result = [Float](repeating: 0, count: halfN * 2)
-        for k in 0..<halfN {
-            // The actual frequency response is the FFT of the complex time-domain filter
-            // For a complex signal x + jy: FFT(x + jy) = FFT(x) + j*FFT(y)
-            result[2 * k] = splitReal[k]      // Real part
-            result[2 * k + 1] = splitImag[k]  // Imag part (from real kernel FFT)
-        }
-
-        return result
-    }
-
-    /// Downsample signal by factor using anti-aliasing filter.
+    /// Downsample signal by factor using vDSP decimation.
+    ///
+    /// Uses vDSP_desamp with a proper anti-aliasing FIR filter designed to
+    /// preserve energy in the passband while attenuating aliasing frequencies.
     private func downsample(_ signal: [Float], factor: Int) -> [Float] {
         guard factor > 1, signal.count > factor else { return signal }
 
-        // Apply simple anti-aliasing lowpass filter (moving average)
-        let filterLen = factor * 2
-        var filtered = [Float](repeating: 0, count: signal.count)
+        // Use vDSP_desamp for efficient polyphase decimation
+        // Design a proper lowpass FIR filter for anti-aliasing
+        // Cutoff at Nyquist/factor with reasonable transition band
 
-        signal.withUnsafeBufferPointer { sigPtr in
-            filtered.withUnsafeMutableBufferPointer { filtPtr in
-                for i in 0..<signal.count {
-                    var sum: Float = 0
-                    var count = 0
-                    for j in max(0, i - filterLen/2)..<min(signal.count, i + filterLen/2) {
-                        sum += sigPtr[j]
-                        count += 1
-                    }
-                    filtPtr[i] = sum / Float(count)
-                }
+        // Create a windowed-sinc lowpass filter
+        // For factor=2 decimation, cutoff = 0.5 * Nyquist = 0.25 * sampleRate
+        let filterTaps = 31  // Odd number for symmetric filter
+        let halfTaps = filterTaps / 2
+        let cutoff: Float = 0.4 / Float(factor)  // Slightly below Nyquist/factor for margin
+
+        var filter = [Float](repeating: 0, count: filterTaps)
+        var filterSum: Float = 0
+
+        // Generate windowed-sinc filter
+        for i in 0..<filterTaps {
+            let n = Float(i - halfTaps)
+            if n == 0 {
+                filter[i] = 2 * cutoff
+            } else {
+                // Sinc function
+                let sincVal = sin(2 * Float.pi * cutoff * n) / (Float.pi * n)
+                // Hamming window for better stopband attenuation
+                let window = 0.54 - 0.46 * cos(2 * Float.pi * Float(i) / Float(filterTaps - 1))
+                filter[i] = sincVal * window
             }
+            filterSum += filter[i]
         }
 
-        // Decimate
-        let outLen = (filtered.count + factor - 1) / factor
+        // Normalize filter for unity gain at DC
+        for i in 0..<filterTaps {
+            filter[i] /= filterSum
+        }
+
+        // Use vDSP_desamp for efficient decimation
+        // vDSP_desamp: C[n] = sum(A[n*DF + k] * B[k]) for k in [0, P)
+        // where DF = decimation factor, P = filter length
+
+        let outLen = (signal.count - filterTaps + factor) / factor
+        guard outLen > 0 else { return signal }
+
         var result = [Float](repeating: 0, count: outLen)
-        for i in 0..<outLen {
-            result[i] = filtered[i * factor]
-        }
 
-        return result
-    }
-
-    private func padSignal(_ signal: [Float], padLength: Int) -> [Float] {
-        guard !signal.isEmpty else { return signal }
-
-        var result = [Float]()
-        result.reserveCapacity(signal.count + 2 * padLength)
-
-        // Zero padding (constant mode) to match librosa default
-        result.append(contentsOf: [Float](repeating: 0, count: padLength))
-        result.append(contentsOf: signal)
-        result.append(contentsOf: [Float](repeating: 0, count: padLength))
+        vDSP_desamp(
+            signal,                    // Input
+            vDSP_Stride(factor),       // Decimation factor
+            filter,                    // Filter coefficients
+            &result,                   // Output
+            vDSP_Length(outLen),       // Output length
+            vDSP_Length(filterTaps)    // Filter length
+        )
 
         return result
     }

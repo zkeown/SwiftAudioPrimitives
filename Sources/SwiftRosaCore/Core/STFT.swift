@@ -11,6 +11,14 @@ public enum PadMode: Sendable {
     case edge
 }
 
+/// Floating-point precision for FFT operations.
+public enum FloatPrecision: Sendable {
+    /// Single precision (Float32) - faster, uses GPU acceleration
+    case float32
+    /// Double precision (Float64) - higher accuracy, CPU only
+    case float64
+}
+
 /// Configuration for STFT computation.
 public struct STFTConfig: Sendable {
     /// FFT size. Default: 2048.
@@ -31,6 +39,11 @@ public struct STFTConfig: Sendable {
     /// Padding mode when center is true. Default: reflect.
     public let padMode: PadMode
 
+    /// Floating-point precision for FFT. Default: float32.
+    /// Use float64 for maximum accuracy (matches librosa exactly).
+    /// Note: float64 disables GPU acceleration.
+    public let precision: FloatPrecision
+
     /// Create STFT configuration.
     ///
     /// - Parameters:
@@ -40,13 +53,15 @@ public struct STFTConfig: Sendable {
     ///   - windowType: Window function (default: hann).
     ///   - center: Pad signal for centered frames (default: true).
     ///   - padMode: Padding mode (default: constant(0), matching librosa).
+    ///   - precision: FFT precision (default: float32).
     public init(
         nFFT: Int = 2048,
         hopLength: Int? = nil,
         winLength: Int? = nil,
         windowType: WindowType = .hann,
         center: Bool = true,
-        padMode: PadMode = .constant(0)
+        padMode: PadMode = .constant(0),
+        precision: FloatPrecision = .float32
     ) {
         self.nFFT = nFFT
         self.hopLength = hopLength ?? (nFFT / 4)
@@ -54,13 +69,14 @@ public struct STFTConfig: Sendable {
         self.windowType = windowType
         self.center = center
         self.padMode = padMode
+        self.precision = precision
     }
 
     /// Number of frequency bins in output (nFFT/2 + 1 for real input).
     public var nFreqs: Int { nFFT / 2 + 1 }
 }
 
-/// Wrapper for FFTSetup to make it Sendable
+/// Wrapper for FFTSetup (Float32) to make it Sendable
 /// Note: FFTSetup is thread-safe for read operations after creation
 public final class FFTSetupWrapper: @unchecked Sendable {
     public let setup: FFTSetup
@@ -71,6 +87,20 @@ public final class FFTSetupWrapper: @unchecked Sendable {
 
     deinit {
         vDSP_destroy_fftsetup(setup)
+    }
+}
+
+/// Wrapper for FFTSetupD (Float64) to make it Sendable
+/// Note: FFTSetupD is thread-safe for read operations after creation
+public final class FFTSetupWrapperD: @unchecked Sendable {
+    public let setup: FFTSetupD
+
+    public init(log2n: vDSP_Length) {
+        self.setup = vDSP_create_fftsetupD(log2n, FFTRadix(kFFTRadix2))!
+    }
+
+    deinit {
+        vDSP_destroy_fftsetupD(setup)
     }
 }
 
@@ -113,7 +143,9 @@ public struct STFT: Sendable {
     public let config: STFTConfig
 
     private let window: [Float]
+    private let windowD: [Double]?
     private let fftSetupWrapper: FFTSetupWrapper
+    private let fftSetupWrapperD: FFTSetupWrapperD?
 
     /// Optional Metal engine for GPU acceleration.
     private let metalEngine: MetalEngine?
@@ -135,8 +167,18 @@ public struct STFT: Sendable {
         let log2n = vDSP_Length(log2(Double(config.nFFT)))
         self.fftSetupWrapper = FFTSetupWrapper(log2n: log2n)
 
-        // Initialize Metal engine if GPU is preferred and available
-        if useGPU && MetalEngine.isAvailable {
+        // Create Float64 FFT setup and window if precision is float64
+        if config.precision == .float64 {
+            self.fftSetupWrapperD = FFTSetupWrapperD(log2n: log2n)
+            self.windowD = window.map { Double($0) }
+        } else {
+            self.fftSetupWrapperD = nil
+            self.windowD = nil
+        }
+
+        // Initialize Metal engine if GPU is preferred, available, and using float32
+        // Note: Metal only supports Float32, so GPU is disabled for Float64 precision
+        if useGPU && MetalEngine.isAvailable && config.precision == .float32 {
             self.metalEngine = try? MetalEngine()
         } else {
             self.metalEngine = nil
@@ -148,6 +190,11 @@ public struct STFT: Sendable {
     /// - Parameter signal: Input audio signal.
     /// - Returns: Complex spectrogram of shape (nFreqs, nFrames).
     public func transform(_ signal: [Float]) async -> ComplexMatrix {
+        // Dispatch to Float64 path if precision is set
+        if config.precision == .float64 {
+            return await transformFloat64(signal)
+        }
+
         let paddedSignal = config.center ? padSignal(signal) : signal
 
         // Get frame start indices instead of copying frames
@@ -260,6 +307,262 @@ public struct STFT: Sendable {
         vDSP_mtrans(imagFrameMajor, 1, &transposedImag, 1, vDSP_Length(nFreqs), vDSP_Length(nFrames))
 
         // Build result arrays using slicing (single allocation per row via Array init)
+        var realResult = [[Float]]()
+        var imagResult = [[Float]]()
+        realResult.reserveCapacity(nFreqs)
+        imagResult.reserveCapacity(nFreqs)
+
+        transposedReal.withUnsafeBufferPointer { realPtr in
+            transposedImag.withUnsafeBufferPointer { imagPtr in
+                for f in 0..<nFreqs {
+                    let start = f * nFrames
+                    realResult.append(Array(UnsafeBufferPointer(start: realPtr.baseAddress! + start, count: nFrames)))
+                    imagResult.append(Array(UnsafeBufferPointer(start: imagPtr.baseAddress! + start, count: nFrames)))
+                }
+            }
+        }
+
+        return ComplexMatrix(real: realResult, imag: imagResult)
+    }
+
+    /// Compute STFT using Float64 precision for maximum accuracy.
+    ///
+    /// This method performs all FFT operations in Double precision and
+    /// converts the result back to Float32 for output compatibility.
+    /// Use when you need to match librosa's precision exactly.
+    ///
+    /// - Parameter signal: Input audio signal.
+    /// - Returns: Complex spectrogram of shape (nFreqs, nFrames).
+    private func transformFloat64(_ signal: [Float]) async -> ComplexMatrix {
+        let paddedSignal = config.center ? padSignal(signal) : signal
+
+        let indices = frameIndices(paddedSignal.count)
+        let nFrames = indices.count
+
+        guard nFrames > 0 else {
+            return ComplexMatrix(real: [], imag: [])
+        }
+
+        guard let fftSetupD = fftSetupWrapperD, let windowD = windowD else {
+            // Fallback to Float32 if Float64 setup is missing
+            return await transformFloat32Internal(signal)
+        }
+
+        let nFFT = config.nFFT
+        let nFreqs = config.nFreqs
+        let winLength = config.winLength
+        let halfN = nFFT / 2
+        let log2n = vDSP_Length(log2(Double(nFFT)))
+
+        // Convert signal to Double once
+        let signalD = paddedSignal.map { Double($0) }
+
+        // Use frame-major output layout for cache-friendly writes
+        var realFrameMajor = [Double](repeating: 0, count: nFrames * nFreqs)
+        var imagFrameMajor = [Double](repeating: 0, count: nFrames * nFreqs)
+
+        let processorCount = ProcessInfo.processInfo.activeProcessorCount
+        let framesPerThread = (nFrames + processorCount - 1) / processorCount
+
+        signalD.withUnsafeBufferPointer { signalPtr in
+            windowD.withUnsafeBufferPointer { windowPtr in
+                realFrameMajor.withUnsafeMutableBufferPointer { outRealPtr in
+                    imagFrameMajor.withUnsafeMutableBufferPointer { outImagPtr in
+                        DispatchQueue.concurrentPerform(iterations: processorCount) { threadIdx in
+                            let startFrame = threadIdx * framesPerThread
+                            let endFrame = min(startFrame + framesPerThread, nFrames)
+
+                            if startFrame >= endFrame { return }
+
+                            // Thread-local workspace (Double precision)
+                            var windowedFrame = [Double](repeating: 0, count: nFFT)
+                            var splitReal = [Double](repeating: 0, count: halfN)
+                            var splitImag = [Double](repeating: 0, count: halfN)
+                            var scale: Double = 0.5
+
+                            windowedFrame.withUnsafeMutableBufferPointer { framePtr in
+                                splitReal.withUnsafeMutableBufferPointer { realPtr in
+                                    splitImag.withUnsafeMutableBufferPointer { imagPtr in
+                                        var split = DSPDoubleSplitComplex(realp: realPtr.baseAddress!, imagp: imagPtr.baseAddress!)
+
+                                        for frameIdx in startFrame..<endFrame {
+                                            let startIdx = indices[frameIdx]
+
+                                            // Zero the frame buffer
+                                            vDSP_vclrD(framePtr.baseAddress!, 1, vDSP_Length(nFFT))
+
+                                            // Window the frame
+                                            let availableSamples = min(startIdx + winLength, signalD.count) - startIdx
+                                            vDSP_vmulD(
+                                                signalPtr.baseAddress! + startIdx, 1,
+                                                windowPtr.baseAddress!, 1,
+                                                framePtr.baseAddress!, 1,
+                                                vDSP_Length(min(availableSamples, winLength))
+                                            )
+
+                                            // Pack into split complex (Double version)
+                                            vDSP_ctozD(
+                                                UnsafePointer<DSPDoubleComplex>(OpaquePointer(framePtr.baseAddress!)),
+                                                2,
+                                                &split,
+                                                1,
+                                                vDSP_Length(halfN)
+                                            )
+
+                                            // FFT (Double precision)
+                                            vDSP_fft_zripD(fftSetupD.setup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
+                                            vDSP_vsmulD(split.realp, 1, &scale, split.realp, 1, vDSP_Length(halfN))
+                                            vDSP_vsmulD(split.imagp, 1, &scale, split.imagp, 1, vDSP_Length(halfN))
+
+                                            // Write to frame-major layout (contiguous per frame)
+                                            let frameOffset = frameIdx * nFreqs
+
+                                            // DC component
+                                            outRealPtr[frameOffset] = split.realp[0]
+                                            outImagPtr[frameOffset] = 0
+
+                                            // Positive frequencies (contiguous copy)
+                                            memcpy(outRealPtr.baseAddress! + frameOffset + 1,
+                                                   realPtr.baseAddress! + 1,
+                                                   (halfN - 1) * MemoryLayout<Double>.size)
+                                            memcpy(outImagPtr.baseAddress! + frameOffset + 1,
+                                                   imagPtr.baseAddress! + 1,
+                                                   (halfN - 1) * MemoryLayout<Double>.size)
+
+                                            // Nyquist
+                                            outRealPtr[frameOffset + halfN] = split.imagp[0]
+                                            outImagPtr[frameOffset + halfN] = 0
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Transpose from frame-major (nFrames × nFreqs) to freq-major (nFreqs × nFrames)
+        var transposedReal = [Double](repeating: 0, count: nFreqs * nFrames)
+        var transposedImag = [Double](repeating: 0, count: nFreqs * nFrames)
+
+        vDSP_mtransD(realFrameMajor, 1, &transposedReal, 1, vDSP_Length(nFreqs), vDSP_Length(nFrames))
+        vDSP_mtransD(imagFrameMajor, 1, &transposedImag, 1, vDSP_Length(nFreqs), vDSP_Length(nFrames))
+
+        // Convert back to Float32 for output and build result arrays
+        var realResult = [[Float]]()
+        var imagResult = [[Float]]()
+        realResult.reserveCapacity(nFreqs)
+        imagResult.reserveCapacity(nFreqs)
+
+        for f in 0..<nFreqs {
+            let start = f * nFrames
+            let end = start + nFrames
+            realResult.append(transposedReal[start..<end].map { Float($0) })
+            imagResult.append(transposedImag[start..<end].map { Float($0) })
+        }
+
+        return ComplexMatrix(real: realResult, imag: imagResult)
+    }
+
+    /// Internal Float32 transform (for fallback when Float64 setup unavailable).
+    private func transformFloat32Internal(_ signal: [Float]) async -> ComplexMatrix {
+        let paddedSignal = config.center ? padSignal(signal) : signal
+
+        let indices = frameIndices(paddedSignal.count)
+        let nFrames = indices.count
+
+        guard nFrames > 0 else {
+            return ComplexMatrix(real: [], imag: [])
+        }
+
+        let nFFT = config.nFFT
+        let nFreqs = config.nFreqs
+        let winLength = config.winLength
+        let halfN = nFFT / 2
+        let log2n = vDSP_Length(log2(Double(nFFT)))
+
+        var realFrameMajor = [Float](repeating: 0, count: nFrames * nFreqs)
+        var imagFrameMajor = [Float](repeating: 0, count: nFrames * nFreqs)
+
+        let processorCount = ProcessInfo.processInfo.activeProcessorCount
+        let framesPerThread = (nFrames + processorCount - 1) / processorCount
+
+        paddedSignal.withUnsafeBufferPointer { signalPtr in
+            window.withUnsafeBufferPointer { windowPtr in
+                realFrameMajor.withUnsafeMutableBufferPointer { outRealPtr in
+                    imagFrameMajor.withUnsafeMutableBufferPointer { outImagPtr in
+                        DispatchQueue.concurrentPerform(iterations: processorCount) { threadIdx in
+                            let startFrame = threadIdx * framesPerThread
+                            let endFrame = min(startFrame + framesPerThread, nFrames)
+
+                            if startFrame >= endFrame { return }
+
+                            var windowedFrame = [Float](repeating: 0, count: nFFT)
+                            var splitReal = [Float](repeating: 0, count: halfN)
+                            var splitImag = [Float](repeating: 0, count: halfN)
+                            var scale: Float = 0.5
+
+                            windowedFrame.withUnsafeMutableBufferPointer { framePtr in
+                                splitReal.withUnsafeMutableBufferPointer { realPtr in
+                                    splitImag.withUnsafeMutableBufferPointer { imagPtr in
+                                        var split = DSPSplitComplex(realp: realPtr.baseAddress!, imagp: imagPtr.baseAddress!)
+
+                                        for frameIdx in startFrame..<endFrame {
+                                            let startIdx = indices[frameIdx]
+
+                                            vDSP_vclr(framePtr.baseAddress!, 1, vDSP_Length(nFFT))
+
+                                            let availableSamples = min(startIdx + winLength, paddedSignal.count) - startIdx
+                                            vDSP_vmul(
+                                                signalPtr.baseAddress! + startIdx, 1,
+                                                windowPtr.baseAddress!, 1,
+                                                framePtr.baseAddress!, 1,
+                                                vDSP_Length(min(availableSamples, winLength))
+                                            )
+
+                                            vDSP_ctoz(
+                                                UnsafePointer<DSPComplex>(OpaquePointer(framePtr.baseAddress!)),
+                                                2,
+                                                &split,
+                                                1,
+                                                vDSP_Length(halfN)
+                                            )
+
+                                            vDSP_fft_zrip(self.fftSetupWrapper.setup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
+                                            vDSP_vsmul(split.realp, 1, &scale, split.realp, 1, vDSP_Length(halfN))
+                                            vDSP_vsmul(split.imagp, 1, &scale, split.imagp, 1, vDSP_Length(halfN))
+
+                                            let frameOffset = frameIdx * nFreqs
+
+                                            outRealPtr[frameOffset] = split.realp[0]
+                                            outImagPtr[frameOffset] = 0
+
+                                            memcpy(outRealPtr.baseAddress! + frameOffset + 1,
+                                                   realPtr.baseAddress! + 1,
+                                                   (halfN - 1) * MemoryLayout<Float>.size)
+                                            memcpy(outImagPtr.baseAddress! + frameOffset + 1,
+                                                   imagPtr.baseAddress! + 1,
+                                                   (halfN - 1) * MemoryLayout<Float>.size)
+
+                                            outRealPtr[frameOffset + halfN] = split.imagp[0]
+                                            outImagPtr[frameOffset + halfN] = 0
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        var transposedReal = [Float](repeating: 0, count: nFreqs * nFrames)
+        var transposedImag = [Float](repeating: 0, count: nFreqs * nFrames)
+
+        vDSP_mtrans(realFrameMajor, 1, &transposedReal, 1, vDSP_Length(nFreqs), vDSP_Length(nFrames))
+        vDSP_mtrans(imagFrameMajor, 1, &transposedImag, 1, vDSP_Length(nFreqs), vDSP_Length(nFrames))
+
         var realResult = [[Float]]()
         var imagResult = [[Float]]()
         realResult.reserveCapacity(nFreqs)

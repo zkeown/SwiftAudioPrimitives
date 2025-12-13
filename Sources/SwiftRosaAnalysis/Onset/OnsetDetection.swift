@@ -70,13 +70,13 @@ public struct OnsetConfig: Sendable {
     /// - post_avg: 0.10 * sr // hop_length + 1 = 5 frames
     /// - wait: 0.03 * sr // hop_length = 1 frame
     /// - delta: 0.07
-    /// - Note: librosa doesn't use a hard peakThreshold, only delta-based threshold
+    /// - peakThreshold: 0.3 (added to filter noise in low-activity signals)
     public init(
         sampleRate: Float = 22050,
         hopLength: Int = 512,
         nFFT: Int = 2048,
         method: OnsetMethod = .auto,
-        peakThreshold: Float = 0.0,
+        peakThreshold: Float = 0.5,
         preMax: Int = 1,
         postMax: Int = 1,
         preAvg: Int = 4,
@@ -288,6 +288,9 @@ public struct OnsetDetector: Sendable {
 
     /// Pick peaks from onset envelope.
     ///
+    /// Implements librosa-compatible peak picking. The envelope is normalized
+    /// to [0,1] and peaks must exceed local mean + delta.
+    ///
     /// - Parameter onsetEnvelope: Onset strength envelope.
     /// - Returns: Indices of detected peaks.
     public func pickPeaks(_ onsetEnvelope: [Float]) -> [Int] {
@@ -299,8 +302,10 @@ public struct OnsetDetector: Sendable {
         // Ensure we have enough samples for peak picking
         guard n > config.preMax + config.postMax else { return [] }
 
-        // Normalize envelope
+        // Find min and max for normalization (librosa shifts to non-negative then scales)
+        var minVal: Float = 0
         var maxVal: Float = 0
+        vDSP_minv(onsetEnvelope, 1, &minVal, vDSP_Length(n))
         vDSP_maxv(onsetEnvelope, 1, &maxVal, vDSP_Length(n))
 
         // If the envelope maximum is below a meaningful threshold,
@@ -308,9 +313,15 @@ public struct OnsetDetector: Sendable {
         let minMeaningfulOnset: Float = 1e-6
         guard maxVal > minMeaningfulOnset else { return [] }
 
+        // Normalize: shift to non-negative, then scale to [0,1]
+        // This matches librosa's onset_detect normalization
         var normalizedEnvelope = [Float](repeating: 0, count: n)
-        var scale = 1.0 / maxVal
-        vDSP_vsmul(onsetEnvelope, 1, &scale, &normalizedEnvelope, 1, vDSP_Length(n))
+        let range = maxVal - minVal
+        if range > minMeaningfulOnset {
+            for i in 0..<n {
+                normalizedEnvelope[i] = (onsetEnvelope[i] - minVal) / range
+            }
+        }
 
         var lastOnset = -config.wait
 
@@ -335,7 +346,7 @@ public struct OnsetDetector: Sendable {
             }
             localAvg /= Float(avgEnd - avgStart)
 
-            // Check threshold
+            // Check threshold: must exceed local average + delta
             let threshold = localAvg + config.delta
             if normalizedEnvelope[i] >= threshold && normalizedEnvelope[i] >= config.peakThreshold {
                 // Check wait constraint

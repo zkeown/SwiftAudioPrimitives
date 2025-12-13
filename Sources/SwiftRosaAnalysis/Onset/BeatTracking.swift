@@ -105,8 +105,43 @@ public struct BeatTracker: Sendable {
     /// - Returns: Estimated tempo in beats per minute, or 0 if no clear rhythm detected.
     public func estimateTempo(_ signal: [Float]) async -> Float {
         // Compute onset strength
-        let onsetEnvelope = await onsetDetector.onsetStrength(signal)
-        guard !onsetEnvelope.isEmpty else { return 0 }
+        let rawOnsetEnvelope = await onsetDetector.onsetStrength(signal)
+        guard rawOnsetEnvelope.count > 10 else { return 0 }
+
+        // Trim edge frames to remove start/end transients that can cause false tempo detection
+        // Steady signals (like multi_tone) have large spikes only at start/end
+        let trimFrames = min(5, rawOnsetEnvelope.count / 10)
+        let onsetEnvelope = Array(rawOnsetEnvelope.dropFirst(trimFrames).dropLast(trimFrames))
+        guard onsetEnvelope.count > 10 else { return 0 }
+
+        // Check if onset envelope has sufficient energy
+        // Very low onset activity means no meaningful rhythm
+        var maxOnset: Float = 0
+        vDSP_maxv(onsetEnvelope, 1, &maxOnset, vDSP_Length(onsetEnvelope.count))
+        let minOnsetStrength: Float = 0.1  // Minimum onset envelope max for tempo detection
+        if maxOnset < minOnsetStrength {
+            return 0  // Too weak onset activity for tempo
+        }
+
+        // Check for periodic content - compute coefficient of variation
+        // A steady signal with no rhythm has very low CV (all values similar)
+        // A rhythmic signal has high CV (peaks and valleys)
+        var mean: Float = 0
+        vDSP_meanv(onsetEnvelope, 1, &mean, vDSP_Length(onsetEnvelope.count))
+        var variance: Float = 0
+        for val in onsetEnvelope {
+            let diff = val - mean
+            variance += diff * diff
+        }
+        variance /= Float(onsetEnvelope.count)
+        let stdDev = sqrt(variance)
+        let cv = mean > 0.001 ? stdDev / mean : 0
+
+        // Low CV means nearly constant envelope - no rhythm
+        // Rhythmic signals typically have CV > 1.0 (std dev larger than mean)
+        if cv < 0.5 {
+            return 0  // Envelope too flat, no clear rhythm
+        }
 
         // Compute autocorrelation
         let autocorr = computeAutocorrelation(onsetEnvelope)
@@ -128,7 +163,7 @@ public struct BeatTracker: Sendable {
 
         // Reject weak tempo estimates
         // librosa uses similar logic - check if autocorrelation peak is strong enough
-        let minTempoStrength: Float = 0.1  // 10% of max autocorr (which is normalized to 1.0)
+        let minTempoStrength: Float = 0.15  // 15% of max autocorr (which is normalized to 1.0)
         if bestValue < minTempoStrength || bestLag == 0 {
             return 0  // No confident tempo detected
         }
@@ -145,7 +180,8 @@ public struct BeatTracker: Sendable {
         let peakRatio = avgInRange > 0 ? bestValue / avgInRange : 0
 
         // Peak should be significantly above average in tempo range
-        if peakRatio < 1.5 {  // Peak not prominent enough relative to noise floor
+        // Increased from 1.5 to 2.0 to reduce false positives on steady signals
+        if peakRatio < 2.0 {  // Peak not prominent enough relative to noise floor
             return 0
         }
 

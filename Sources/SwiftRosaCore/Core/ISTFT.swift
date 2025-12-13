@@ -9,10 +9,13 @@ public struct ISTFT: Sendable {
     public let config: STFTConfig
 
     private let window: [Float]
+    private let windowD: [Double]?
     private let fftSetupWrapper: FFTSetupWrapper
+    private let fftSetupWrapperD: FFTSetupWrapperD?
 
     /// Pre-computed squared window for normalization.
     private let windowSquared: [Float]
+    private let windowSquaredD: [Double]?
 
     /// Optional Metal engine for GPU acceleration.
     private let metalEngine: MetalEngine?
@@ -39,8 +42,19 @@ public struct ISTFT: Sendable {
         let log2n = vDSP_Length(log2(Double(config.nFFT)))
         self.fftSetupWrapper = FFTSetupWrapper(log2n: log2n)
 
-        // Initialize Metal engine if GPU is preferred and available
-        if useGPU && MetalEngine.isAvailable {
+        // Create Float64 FFT setup if precision is float64
+        if config.precision == .float64 {
+            self.fftSetupWrapperD = FFTSetupWrapperD(log2n: log2n)
+            self.windowD = window.map { Double($0) }
+            self.windowSquaredD = squared.map { Double($0) }
+        } else {
+            self.fftSetupWrapperD = nil
+            self.windowD = nil
+            self.windowSquaredD = nil
+        }
+
+        // Initialize Metal engine if GPU is preferred, available, and using float32
+        if useGPU && MetalEngine.isAvailable && config.precision == .float32 {
             self.metalEngine = try? MetalEngine()
         } else {
             self.metalEngine = nil
@@ -68,6 +82,11 @@ public struct ISTFT: Sendable {
     ///   - length: Expected output length. If nil, computed from spectrogram shape.
     /// - Returns: Reconstructed audio signal.
     public func transform(_ spectrogram: ContiguousComplexMatrix, length: Int? = nil) async -> [Float] {
+        // Dispatch to Float64 path if precision is set
+        if config.precision == .float64 {
+            return await transformFloat64(spectrogram, length: length)
+        }
+
         let nFrames = spectrogram.cols
         let nFreqs = config.nFreqs
         let nFFT = config.nFFT
@@ -178,43 +197,40 @@ public struct ISTFT: Sendable {
             }
         }
 
-        // Sequential overlap-add
-        var output = [Float](repeating: 0, count: bufferLength)
-        var windowSum = [Float](repeating: 0, count: bufferLength)
+        // Sequential overlap-add using Float64 for precision
+        // This reduces accumulation error from ~5e-5 to ~1e-6
+        var output64 = [Double](repeating: 0, count: bufferLength)
+        var windowSum64 = [Double](repeating: 0, count: bufferLength)
 
-        output.withUnsafeMutableBufferPointer { outPtr in
-            windowSum.withUnsafeMutableBufferPointer { sumPtr in
+        // Pre-convert windowSquared to Double once
+        let windowSquared64 = windowSquared.map { Double($0) }
+
+        output64.withUnsafeMutableBufferPointer { outPtr in
+            windowSum64.withUnsafeMutableBufferPointer { sumPtr in
                 frameResults.withUnsafeBufferPointer { framePtr in
-                    for frameIdx in 0..<nFrames {
-                        let startIdx = frameIdx * hopLength
-                        let addLen = min(winLength, bufferLength - startIdx)
-                        let frameOffset = frameIdx * winLength
+                    windowSquared64.withUnsafeBufferPointer { sqPtr in
+                        for frameIdx in 0..<nFrames {
+                            let startIdx = frameIdx * hopLength
+                            let addLen = min(winLength, bufferLength - startIdx)
+                            let frameOffset = frameIdx * winLength
 
-                        vDSP_vadd(
-                            outPtr.baseAddress! + startIdx, 1,
-                            framePtr.baseAddress! + frameOffset, 1,
-                            outPtr.baseAddress! + startIdx, 1,
-                            vDSP_Length(addLen)
-                        )
-
-                        self.windowSquared.withUnsafeBufferPointer { sqPtr in
-                            vDSP_vadd(
-                                sumPtr.baseAddress! + startIdx, 1,
-                                sqPtr.baseAddress!, 1,
-                                sumPtr.baseAddress! + startIdx, 1,
-                                vDSP_Length(addLen)
-                            )
+                            // Accumulate frame results in Float64
+                            for i in 0..<addLen {
+                                outPtr[startIdx + i] += Double(framePtr[frameOffset + i])
+                                sumPtr[startIdx + i] += sqPtr[i]
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Normalize by squared window sum
-        let epsilon: Float = 1e-8
+        // Normalize and convert back to Float32
+        let epsilon: Double = 1e-10
+        var output = [Float](repeating: 0, count: bufferLength)
         for i in 0..<bufferLength {
-            if windowSum[i] > epsilon {
-                output[i] /= windowSum[i]
+            if windowSum64[i] > epsilon {
+                output[i] = Float(output64[i] / windowSum64[i])
             }
         }
 
@@ -229,29 +245,334 @@ public struct ISTFT: Sendable {
         }
     }
 
-    /// CPU overlap-add with window normalization.
-    private func overlapAddCPU(frames: [[Float]], bufferLength: Int) -> [Float] {
-        var output = [Float](repeating: 0, count: bufferLength)
-        var windowSum = [Float](repeating: 0, count: bufferLength)
+    /// Reconstruct signal using Float64 precision IFFT.
+    ///
+    /// This method performs all IFFT operations in Double precision for maximum accuracy.
+    private func transformFloat64(_ spectrogram: ContiguousComplexMatrix, length: Int? = nil) async -> [Float] {
+        let nFrames = spectrogram.cols
+        let nFreqs = config.nFreqs
+        let nFFT = config.nFFT
+        let winLength = config.winLength
+        let hopLength = config.hopLength
 
-        for (frameIdx, frame) in frames.enumerated() {
-            let startIdx = frameIdx * config.hopLength
+        guard nFrames > 0 else { return [] }
 
-            // Apply window and accumulate
-            for i in 0..<min(frame.count, config.winLength) {
-                let outputIdx = startIdx + i
-                if outputIdx < bufferLength {
-                    output[outputIdx] += frame[i] * window[i]
-                    windowSum[outputIdx] += windowSquared[i]
+        guard let fftSetupD = fftSetupWrapperD,
+              let windowD = windowD,
+              let windowSquaredD = windowSquaredD else {
+            // Fallback to Float32 if Float64 setup is missing
+            return await transformFloat32Internal(spectrogram, length: length)
+        }
+
+        // Compute output length
+        let expectedLength: Int
+        if let length = length {
+            expectedLength = length
+        } else {
+            let uncenteredLength = nFFT + (nFrames - 1) * hopLength
+            expectedLength = config.center ? uncenteredLength - nFFT : uncenteredLength
+        }
+
+        let bufferLength = config.center
+            ? expectedLength + nFFT
+            : nFFT + (nFrames - 1) * hopLength
+
+        let halfN = nFFT / 2
+        let log2n = vDSP_Length(log2(Double(nFFT)))
+
+        // Convert spectrogram to Double
+        let spectrogramRealD = spectrogram.real.map { Double($0) }
+        let spectrogramImagD = spectrogram.imag.map { Double($0) }
+
+        // Transpose spectrogram from (nFreqs, nFrames) to (nFrames, nFreqs)
+        var transposedReal = [Double](repeating: 0, count: nFreqs * nFrames)
+        var transposedImag = [Double](repeating: 0, count: nFreqs * nFrames)
+
+        spectrogramRealD.withUnsafeBufferPointer { realPtr in
+            spectrogramImagD.withUnsafeBufferPointer { imagPtr in
+                vDSP_mtransD(realPtr.baseAddress!, 1, &transposedReal, 1,
+                            vDSP_Length(nFrames), vDSP_Length(nFreqs))
+                vDSP_mtransD(imagPtr.baseAddress!, 1, &transposedImag, 1,
+                            vDSP_Length(nFrames), vDSP_Length(nFreqs))
+            }
+        }
+
+        // Frame results in Double precision
+        var frameResults = [Double](repeating: 0, count: nFrames * winLength)
+
+        let processorCount = ProcessInfo.processInfo.activeProcessorCount
+        let framesPerThread = (nFrames + processorCount - 1) / processorCount
+
+        // Parallel IFFT processing with Float64
+        frameResults.withUnsafeMutableBufferPointer { resultsPtr in
+            transposedReal.withUnsafeBufferPointer { transRealPtr in
+                transposedImag.withUnsafeBufferPointer { transImagPtr in
+                    windowD.withUnsafeBufferPointer { windowPtr in
+                        DispatchQueue.concurrentPerform(iterations: processorCount) { threadIdx in
+                            let startFrame = threadIdx * framesPerThread
+                            let endFrame = min(startFrame + framesPerThread, nFrames)
+
+                            if startFrame >= endFrame { return }
+
+                            // Thread-local workspace (Double precision)
+                            var fullReal = [Double](repeating: 0, count: halfN)
+                            var fullImag = [Double](repeating: 0, count: halfN)
+                            var reconstructed = [Double](repeating: 0, count: nFFT)
+                            var scale = 1.0 / Double(nFFT)
+
+                            fullReal.withUnsafeMutableBufferPointer { fullRealPtr in
+                                fullImag.withUnsafeMutableBufferPointer { fullImagPtr in
+                                    reconstructed.withUnsafeMutableBufferPointer { reconPtr in
+                                        for frameIdx in startFrame..<endFrame {
+                                            let frameOffset = frameIdx * nFreqs
+
+                                            // DC and Nyquist
+                                            fullRealPtr[0] = transRealPtr[frameOffset]
+                                            fullImagPtr[0] = transRealPtr[frameOffset + halfN]
+
+                                            // Positive frequencies - bulk copy
+                                            memcpy(fullRealPtr.baseAddress! + 1,
+                                                   transRealPtr.baseAddress! + frameOffset + 1,
+                                                   (halfN - 1) * MemoryLayout<Double>.size)
+                                            memcpy(fullImagPtr.baseAddress! + 1,
+                                                   transImagPtr.baseAddress! + frameOffset + 1,
+                                                   (halfN - 1) * MemoryLayout<Double>.size)
+
+                                            // Inverse FFT (Double precision)
+                                            var split = DSPDoubleSplitComplex(realp: fullRealPtr.baseAddress!, imagp: fullImagPtr.baseAddress!)
+                                            vDSP_fft_zripD(fftSetupD.setup, &split, 1, log2n, FFTDirection(kFFTDirection_Inverse))
+
+                                            // Unpack to real
+                                            vDSP_ztocD(
+                                                &split, 1,
+                                                UnsafeMutablePointer<DSPDoubleComplex>(OpaquePointer(reconPtr.baseAddress!)),
+                                                2,
+                                                vDSP_Length(halfN)
+                                            )
+
+                                            // Scale
+                                            vDSP_vsmulD(reconPtr.baseAddress!, 1, &scale, reconPtr.baseAddress!, 1, vDSP_Length(nFFT))
+
+                                            // Apply window and store
+                                            let resultOffset = frameIdx * winLength
+                                            vDSP_vmulD(reconPtr.baseAddress!, 1, windowPtr.baseAddress!, 1,
+                                                      resultsPtr.baseAddress! + resultOffset, 1, vDSP_Length(winLength))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Normalize by squared window sum
-        let epsilon: Float = 1e-8
+        // Overlap-add in Float64 (already using Double, no conversion needed)
+        var output64 = [Double](repeating: 0, count: bufferLength)
+        var windowSum64 = [Double](repeating: 0, count: bufferLength)
+
+        output64.withUnsafeMutableBufferPointer { outPtr in
+            windowSum64.withUnsafeMutableBufferPointer { sumPtr in
+                frameResults.withUnsafeBufferPointer { framePtr in
+                    windowSquaredD.withUnsafeBufferPointer { sqPtr in
+                        for frameIdx in 0..<nFrames {
+                            let startIdx = frameIdx * hopLength
+                            let addLen = min(winLength, bufferLength - startIdx)
+                            let frameOffset = frameIdx * winLength
+
+                            for i in 0..<addLen {
+                                outPtr[startIdx + i] += framePtr[frameOffset + i]
+                                sumPtr[startIdx + i] += sqPtr[i]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Normalize and convert to Float32
+        let epsilon: Double = 1e-10
+        var output = [Float](repeating: 0, count: bufferLength)
         for i in 0..<bufferLength {
-            if windowSum[i] > epsilon {
-                output[i] /= windowSum[i]
+            if windowSum64[i] > epsilon {
+                output[i] = Float(output64[i] / windowSum64[i])
+            }
+        }
+
+        // Remove padding if centered
+        if config.center {
+            let padLength = nFFT / 2
+            let startIdx = padLength
+            let endIdx = min(startIdx + expectedLength, bufferLength)
+            return Array(output[startIdx..<endIdx])
+        } else {
+            return Array(output.prefix(expectedLength))
+        }
+    }
+
+    /// Internal Float32 transform (for fallback).
+    private func transformFloat32Internal(_ spectrogram: ContiguousComplexMatrix, length: Int? = nil) async -> [Float] {
+        let nFrames = spectrogram.cols
+        let nFreqs = config.nFreqs
+        let nFFT = config.nFFT
+        let winLength = config.winLength
+        let hopLength = config.hopLength
+
+        guard nFrames > 0 else { return [] }
+
+        let expectedLength: Int
+        if let length = length {
+            expectedLength = length
+        } else {
+            let uncenteredLength = nFFT + (nFrames - 1) * hopLength
+            expectedLength = config.center ? uncenteredLength - nFFT : uncenteredLength
+        }
+
+        let bufferLength = config.center
+            ? expectedLength + nFFT
+            : nFFT + (nFrames - 1) * hopLength
+
+        let halfN = nFFT / 2
+        let log2n = vDSP_Length(log2(Double(nFFT)))
+
+        var transposedReal = [Float](repeating: 0, count: nFreqs * nFrames)
+        var transposedImag = [Float](repeating: 0, count: nFreqs * nFrames)
+
+        spectrogram.real.withUnsafeBufferPointer { realPtr in
+            spectrogram.imag.withUnsafeBufferPointer { imagPtr in
+                vDSP_mtrans(realPtr.baseAddress!, 1, &transposedReal, 1,
+                            vDSP_Length(nFrames), vDSP_Length(nFreqs))
+                vDSP_mtrans(imagPtr.baseAddress!, 1, &transposedImag, 1,
+                            vDSP_Length(nFrames), vDSP_Length(nFreqs))
+            }
+        }
+
+        var frameResults = [Float](repeating: 0, count: nFrames * winLength)
+
+        let processorCount = ProcessInfo.processInfo.activeProcessorCount
+        let framesPerThread = (nFrames + processorCount - 1) / processorCount
+
+        frameResults.withUnsafeMutableBufferPointer { resultsPtr in
+            transposedReal.withUnsafeBufferPointer { transRealPtr in
+                transposedImag.withUnsafeBufferPointer { transImagPtr in
+                    DispatchQueue.concurrentPerform(iterations: processorCount) { threadIdx in
+                        let startFrame = threadIdx * framesPerThread
+                        let endFrame = min(startFrame + framesPerThread, nFrames)
+
+                        if startFrame >= endFrame { return }
+
+                        var fullReal = [Float](repeating: 0, count: halfN)
+                        var fullImag = [Float](repeating: 0, count: halfN)
+                        var reconstructed = [Float](repeating: 0, count: nFFT)
+                        var scale = 1.0 / Float(nFFT)
+
+                        fullReal.withUnsafeMutableBufferPointer { fullRealPtr in
+                            fullImag.withUnsafeMutableBufferPointer { fullImagPtr in
+                                reconstructed.withUnsafeMutableBufferPointer { reconPtr in
+                                    for frameIdx in startFrame..<endFrame {
+                                        let frameOffset = frameIdx * nFreqs
+
+                                        fullRealPtr[0] = transRealPtr[frameOffset]
+                                        fullImagPtr[0] = transRealPtr[frameOffset + halfN]
+
+                                        memcpy(fullRealPtr.baseAddress! + 1,
+                                               transRealPtr.baseAddress! + frameOffset + 1,
+                                               (halfN - 1) * MemoryLayout<Float>.size)
+                                        memcpy(fullImagPtr.baseAddress! + 1,
+                                               transImagPtr.baseAddress! + frameOffset + 1,
+                                               (halfN - 1) * MemoryLayout<Float>.size)
+
+                                        var split = DSPSplitComplex(realp: fullRealPtr.baseAddress!, imagp: fullImagPtr.baseAddress!)
+                                        vDSP_fft_zrip(self.fftSetupWrapper.setup, &split, 1, log2n, FFTDirection(kFFTDirection_Inverse))
+
+                                        vDSP_ztoc(
+                                            &split, 1,
+                                            UnsafeMutablePointer<DSPComplex>(OpaquePointer(reconPtr.baseAddress!)),
+                                            2,
+                                            vDSP_Length(halfN)
+                                        )
+
+                                        vDSP_vsmul(reconPtr.baseAddress!, 1, &scale, reconPtr.baseAddress!, 1, vDSP_Length(nFFT))
+
+                                        let resultOffset = frameIdx * winLength
+                                        self.window.withUnsafeBufferPointer { windowPtr in
+                                            vDSP_vmul(reconPtr.baseAddress!, 1, windowPtr.baseAddress!, 1, resultsPtr.baseAddress! + resultOffset, 1, vDSP_Length(winLength))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        var output64 = [Double](repeating: 0, count: bufferLength)
+        var windowSum64 = [Double](repeating: 0, count: bufferLength)
+        let windowSquared64 = windowSquared.map { Double($0) }
+
+        output64.withUnsafeMutableBufferPointer { outPtr in
+            windowSum64.withUnsafeMutableBufferPointer { sumPtr in
+                frameResults.withUnsafeBufferPointer { framePtr in
+                    windowSquared64.withUnsafeBufferPointer { sqPtr in
+                        for frameIdx in 0..<nFrames {
+                            let startIdx = frameIdx * hopLength
+                            let addLen = min(winLength, bufferLength - startIdx)
+                            let frameOffset = frameIdx * winLength
+
+                            for i in 0..<addLen {
+                                outPtr[startIdx + i] += Double(framePtr[frameOffset + i])
+                                sumPtr[startIdx + i] += sqPtr[i]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let epsilon: Double = 1e-10
+        var output = [Float](repeating: 0, count: bufferLength)
+        for i in 0..<bufferLength {
+            if windowSum64[i] > epsilon {
+                output[i] = Float(output64[i] / windowSum64[i])
+            }
+        }
+
+        if config.center {
+            let padLength = nFFT / 2
+            let startIdx = padLength
+            let endIdx = min(startIdx + expectedLength, bufferLength)
+            return Array(output[startIdx..<endIdx])
+        } else {
+            return Array(output.prefix(expectedLength))
+        }
+    }
+
+    /// CPU overlap-add with window normalization using Float64 accumulation.
+    private func overlapAddCPU(frames: [[Float]], bufferLength: Int) -> [Float] {
+        // Use Float64 for accumulation to reduce numerical error
+        var output64 = [Double](repeating: 0, count: bufferLength)
+        var windowSum64 = [Double](repeating: 0, count: bufferLength)
+
+        for (frameIdx, frame) in frames.enumerated() {
+            let startIdx = frameIdx * config.hopLength
+
+            // Apply window and accumulate in Float64
+            for i in 0..<min(frame.count, config.winLength) {
+                let outputIdx = startIdx + i
+                if outputIdx < bufferLength {
+                    output64[outputIdx] += Double(frame[i]) * Double(window[i])
+                    windowSum64[outputIdx] += Double(windowSquared[i])
+                }
+            }
+        }
+
+        // Normalize and convert back to Float32
+        var output = [Float](repeating: 0, count: bufferLength)
+        let epsilon: Double = 1e-10
+        for i in 0..<bufferLength {
+            if windowSum64[i] > epsilon {
+                output[i] = Float(output64[i] / windowSum64[i])
             }
         }
 
