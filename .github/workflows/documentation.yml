@@ -28,14 +28,19 @@ jobs:
         with:
           swift-version: '5.9'
 
+      - name: Build Package First
+        run: |
+          # Build the package first with relaxed concurrency checking
+          # This pre-compiles all modules so doc generation doesn't fail
+          swift build --disable-sandbox -Xswiftc -strict-concurrency=minimal
+
       - name: Build Documentation
         run: |
-          # Disable sandbox to allow Metal shader compilation on GitHub runners
-          # Also use minimal concurrency checking for faster builds
+          # Generate documentation from pre-built package
           swift package \
             --disable-sandbox \
-            -Xswiftc -strict-concurrency=minimal \
             generate-documentation \
+            --skip-synthesized-symbols \
             --output-path ./docs \
             --transform-for-static-hosting \
             --hosting-base-path SwiftRosa
