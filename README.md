@@ -39,7 +39,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/zkeown/SwiftRosa.git", from: "1.0.0")
+    .package(url: "https://github.com/zkeown/SwiftRosa.git", from: "1.1.0")
 ]
 ```
 
@@ -151,7 +151,9 @@ Neural network primitives with Metal acceleration.
 |-----------|-------------|
 | `LSTMLayer` | LSTM recurrent layer |
 | `BiLSTMLayer` | Bidirectional LSTM |
-| `LSTMEngine` | Metal GPU acceleration |
+| `GRULayer` | GRU recurrent layer (~25% less memory than LSTM) |
+| `BiGRULayer` | Bidirectional GRU |
+| `LSTMEngine` | Metal GPU acceleration for LSTM and GRU |
 | `WeightLoader` | Model weight utilities |
 
 ## Performance

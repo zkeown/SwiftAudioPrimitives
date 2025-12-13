@@ -5,6 +5,28 @@ All notable changes to SwiftRosa will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2025-12-12
+
+### Added
+
+- **GRU Support**: Complete GRU (Gated Recurrent Unit) implementation for SwiftRosaNN
+  - `GRUCell` for single-timestep processing
+  - `GRULayer` for full sequence processing
+  - `BiGRULayer` for bidirectional GRU
+  - `GRUConfig`, `GRUState`, `GRUWeights` configuration and state types
+  - Metal-accelerated GRU kernels (`gru_state_update`, `gru_add_bias_ih`, `gru_add_bias_hh`)
+  - ~25% less memory than equivalent LSTM (3 gates vs 4, no cell state)
+  - PyTorch-compatible weight format and gate ordering (reset, update, new)
+- `WeightLoader.loadGRUWeights()` for loading GRU model weights from binary files
+- Comprehensive GRU test suite with PyTorch reference validation
+- Reference data generation script `scripts/generate_gru_reference.py`
+
+### Changed
+
+- `LSTMEngine` now supports both LSTM and GRU cell operations via `gruCellForward()`
+- `NNShaders.metal` includes GRU-specific compute kernels
+- Improved buffer management consistency in GRU operations
+
 ## [1.0.0] - 2025-12-12
 
 ### Added
