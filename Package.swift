@@ -37,7 +37,8 @@ let package = Package(
             dependencies: [],
             path: "Sources/SwiftRosaCore",
             resources: [
-                .process("Metal/Shaders.metal"),
+                // Metal shaders are compiled by MetalCompilerPlugin - do NOT add .process() here
+                // as it causes duplicate metallib errors when used as a dependency with xcodebuild
                 .process("Resources/PrivacyInfo.xcprivacy"),
             ],
             linkerSettings: [
@@ -91,9 +92,7 @@ let package = Package(
             name: "SwiftRosaNN",
             dependencies: ["SwiftRosaCore"],
             path: "Sources/SwiftRosaNN",
-            resources: [
-                .process("Metal/NNShaders.metal")
-            ],
+            // Metal shaders are compiled by MetalCompilerPlugin - do NOT add .process() for .metal files
             linkerSettings: [
                 .linkedFramework("Accelerate"),
                 .linkedFramework("Metal"),
