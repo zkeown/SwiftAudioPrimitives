@@ -149,8 +149,9 @@ final class LibrosaComparisonTests: XCTestCase {
             URL(fileURLWithPath: #file)
                 .deletingLastPathComponent()
                 .appendingPathComponent("ReferenceTimings/librosa_timings.json"),
-            // Absolute fallback path during development
-            URL(fileURLWithPath: "/Users/zakkeown/Code/SwiftAudioPrimitives/Tests/SwiftRosaBenchmarks/ReferenceTimings/librosa_timings.json"),
+            // Path from current working directory
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Tests/SwiftRosaBenchmarks/ReferenceTimings/librosa_timings.json"),
         ]
 
         for path in possiblePaths {

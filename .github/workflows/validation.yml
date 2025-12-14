@@ -66,6 +66,33 @@ jobs:
             Tests/SwiftRosaCoreTests/ReferenceData/librosa_reference.json
           retention-days: 7
 
+  build-ios:
+    name: Build (iOS Simulator)
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 15
+        run: sudo xcode-select -s /Applications/Xcode_15.2.app
+
+      - name: Build for iOS Simulator
+        run: |
+          xcodebuild build \
+            -scheme SwiftRosa \
+            -destination 'platform=iOS Simulator,name=iPhone 15,OS=17.2' \
+            -skipPackagePluginValidation \
+            2>&1 | tee ios_build_output.txt
+
+      - name: Upload iOS build results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-results
+          path: ios_build_output.txt
+          retention-days: 7
+
   run-validation-tests:
     name: Run Validation Tests
     needs: generate-reference-data
@@ -164,7 +191,7 @@ jobs:
 
   validation-summary:
     name: Validation Summary
-    needs: [generate-reference-data, run-validation-tests, api-coverage]
+    needs: [generate-reference-data, build-ios, run-validation-tests, api-coverage]
     runs-on: ubuntu-latest
     if: always()
 

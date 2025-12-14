@@ -37,7 +37,8 @@ let package = Package(
             dependencies: [],
             path: "Sources/SwiftRosaCore",
             resources: [
-                .process("Metal/Shaders.metal")
+                .process("Metal/Shaders.metal"),
+                .process("Resources/PrivacyInfo.xcprivacy"),
             ],
             linkerSettings: [
                 .linkedFramework("Accelerate"),
