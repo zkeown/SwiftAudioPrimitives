@@ -451,3 +451,135 @@ kernel void store_timestep(
 
     output[outputOffset] = input[inputOffset];
 }
+
+// MARK: - Optimized GRU Sequence Kernel
+
+/// GRU state update for a single timestep within a sequence.
+/// This variant reads from a pre-computed gates buffer that contains all timesteps.
+///
+/// Used by gruSequenceForward to process all timesteps with a single command buffer.
+///
+/// Parameters:
+/// - gatesIH: All input-to-hidden gates [seqLen, batchSize, 3*hiddenSize]
+/// - gatesHH: Hidden-to-hidden gates buffer [batchSize, 3*hiddenSize] (recomputed per step)
+/// - hState: Current hidden state [batchSize, hiddenSize] (read/write)
+/// - hOutput: Output buffer for this timestep [batchSize, hiddenSize]
+/// - hiddenSize: Hidden dimension
+/// - batchSize: Batch size
+kernel void gru_timestep_update(
+    device const float* gatesIH [[buffer(0)]],
+    device const float* gatesHH [[buffer(1)]],
+    device float* hState [[buffer(2)]],
+    device float* hOutput [[buffer(3)]],
+    constant uint& hiddenSize [[buffer(4)]],
+    constant uint& batchSize [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint hiddenIdx = gid.x;
+    uint batchIdx = gid.y;
+
+    if (hiddenIdx >= hiddenSize || batchIdx >= batchSize) {
+        return;
+    }
+
+    uint H = hiddenSize;
+    uint gateOffset = batchIdx * (3 * H);
+    uint stateOffset = batchIdx * H + hiddenIdx;
+
+    // Read gate pre-activations (gates order: r, z, n)
+    float r_ih = gatesIH[gateOffset + hiddenIdx];
+    float r_hh = gatesHH[gateOffset + hiddenIdx];
+    float z_ih = gatesIH[gateOffset + H + hiddenIdx];
+    float z_hh = gatesHH[gateOffset + H + hiddenIdx];
+    float n_ih = gatesIH[gateOffset + 2 * H + hiddenIdx];
+    float n_hh = gatesHH[gateOffset + 2 * H + hiddenIdx];
+
+    // Compute gates
+    float r = 1.0f / (1.0f + exp(-(r_ih + r_hh)));
+    float z = 1.0f / (1.0f + exp(-(z_ih + z_hh)));
+    float n = tanh(n_ih + r * n_hh);
+
+    // State update
+    float h_prev = hState[stateOffset];
+    float h_new = (1.0f - z) * n + z * h_prev;
+
+    // Write outputs
+    hState[stateOffset] = h_new;
+    hOutput[stateOffset] = h_new;
+}
+
+// MARK: - 4D Tensor Transpose
+
+/// Transpose dimensions 1 and 2 of a 4D tensor.
+/// [batch, dim1, dim2, features] -> [batch, dim2, dim1, features]
+///
+/// This is used for SeqBand modelling to swap between time-first and band-first layouts.
+///
+/// Parameters:
+/// - input: Input tensor [batch * dim1 * dim2 * features]
+/// - output: Output tensor [batch * dim2 * dim1 * features]
+/// - batch: Batch dimension
+/// - dim1: First spatial dimension (will become second)
+/// - dim2: Second spatial dimension (will become first)
+/// - features: Feature dimension
+kernel void transpose_4d(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& batch [[buffer(2)]],
+    constant uint& dim1 [[buffer(3)]],
+    constant uint& dim2 [[buffer(4)]],
+    constant uint& features [[buffer(5)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint featIdx = gid.x;
+    uint d2Idx = gid.y;
+    uint combined = gid.z;  // batch * dim1
+
+    uint batchIdx = combined / dim1;
+    uint d1Idx = combined % dim1;
+
+    if (featIdx >= features || d2Idx >= dim2 || batchIdx >= batch) {
+        return;
+    }
+
+    // Input index: [batch, dim1, dim2, features]
+    uint srcOffset = ((batchIdx * dim1 + d1Idx) * dim2 + d2Idx) * features + featIdx;
+
+    // Output index: [batch, dim2, dim1, features]
+    uint dstOffset = ((batchIdx * dim2 + d2Idx) * dim1 + d1Idx) * features + featIdx;
+
+    output[dstOffset] = input[srcOffset];
+}
+
+// MARK: - Complex Multiplication (Vectorized)
+
+/// Complex multiplication of two arrays.
+/// (a + bi) * (c + di) = (ac - bd) + (ad + bc)i
+///
+/// Both arrays are interleaved: [real0, imag0, real1, imag1, ...]
+///
+/// Parameters:
+/// - a: First complex array (spectrogram)
+/// - b: Second complex array (mask)
+/// - output: Result complex array
+/// - count: Number of complex elements (total floats / 2)
+kernel void complex_multiply(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= count) {
+        return;
+    }
+
+    uint idx = gid * 2;
+    float ar = a[idx];
+    float ai = a[idx + 1];
+    float br = b[idx];
+    float bi = b[idx + 1];
+
+    output[idx] = ar * br - ai * bi;      // real part
+    output[idx + 1] = ar * bi + ai * br;  // imag part
+}
