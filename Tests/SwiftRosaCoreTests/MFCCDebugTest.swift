@@ -11,7 +11,6 @@ final class MFCCDebugTest: XCTestCase {
                 .appendingPathComponent("ReferenceData/librosa_reference.json")
                 .path,
             FileManager.default.currentDirectoryPath + "/Tests/SwiftRosaCoreTests/ReferenceData/librosa_reference.json",
-            "/Users/zakkeown/Code/SwiftAudioPrimitives/Tests/SwiftRosaCoreTests/ReferenceData/librosa_reference.json"
         ]
 
         var referenceData: [String: Any]?

@@ -3,8 +3,25 @@ import XCTest
 @testable import SwiftRosaAnalysis
 
 final class TempoDebugTest: XCTestCase {
+    func findReferencePath() -> String {
+        let possiblePaths = [
+            URL(fileURLWithPath: #file)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("SwiftRosaCoreTests/ReferenceData/librosa_reference.json")
+                .path,
+            FileManager.default.currentDirectoryPath + "/Tests/SwiftRosaCoreTests/ReferenceData/librosa_reference.json",
+        ]
+        for path in possiblePaths {
+            if FileManager.default.fileExists(atPath: path) {
+                return path
+            }
+        }
+        return possiblePaths[0]
+    }
+
     func loadReferenceSignal(_ name: String) throws -> [Float] {
-        let refPath = "/Users/zakkeown/Code/SwiftAudioPrimitives/Tests/SwiftRosaCoreTests/ReferenceData/librosa_reference.json"
+        let refPath = findReferencePath()
         let data = try Data(contentsOf: URL(fileURLWithPath: refPath))
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let signals = json["test_signals"] as? [String: Any],

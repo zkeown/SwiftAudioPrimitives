@@ -66,6 +66,44 @@ jobs:
             Tests/SwiftRosaCoreTests/ReferenceData/librosa_reference.json
           retention-days: 7
 
+  build-ios:
+    name: Build (iOS Simulator)
+    strategy:
+      matrix:
+        include:
+          - destination: 'platform=iOS Simulator,name=iPhone SE (3rd generation),OS=17.0'
+            name: 'iOS 17 (iPhone SE 3rd gen)'
+            xcode: '15.2'
+            runner: macos-14
+          - destination: 'platform=iOS Simulator,name=iPhone 17 Pro Max,OS=26.1'
+            name: 'iOS 26.1 (iPhone 17 Pro Max)'
+            xcode: '26.1.1'
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode ${{ matrix.xcode }}
+        run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
+
+      - name: Build for ${{ matrix.name }}
+        run: |
+          xcodebuild build \
+            -scheme SwiftRosa \
+            -destination '${{ matrix.destination }}' \
+            -skipPackagePluginValidation \
+            2>&1 | tee ios_build_output.txt
+
+      - name: Upload iOS build results (${{ matrix.name }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-results-${{ matrix.name }}
+          path: ios_build_output.txt
+          retention-days: 7
+
   run-validation-tests:
     name: Run Validation Tests
     needs: generate-reference-data
@@ -164,7 +202,7 @@ jobs:
 
   validation-summary:
     name: Validation Summary
-    needs: [generate-reference-data, run-validation-tests, api-coverage]
+    needs: [generate-reference-data, build-ios, run-validation-tests, api-coverage]
     runs-on: ubuntu-latest
     if: always()
 

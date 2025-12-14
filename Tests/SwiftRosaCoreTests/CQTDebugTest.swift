@@ -5,7 +5,11 @@ import XCTest
 final class CQTDebugTest: XCTestCase {
     func testCQTValues() async throws {
         let possiblePaths = [
-            "/Users/zakkeown/Code/SwiftAudioPrimitives/Tests/SwiftRosaCoreTests/ReferenceData/librosa_reference.json"
+            URL(fileURLWithPath: #file)
+                .deletingLastPathComponent()
+                .appendingPathComponent("ReferenceData/librosa_reference.json")
+                .path,
+            FileManager.default.currentDirectoryPath + "/Tests/SwiftRosaCoreTests/ReferenceData/librosa_reference.json",
         ]
 
         var referenceData: [String: Any]?
