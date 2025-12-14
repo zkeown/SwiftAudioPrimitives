@@ -182,6 +182,7 @@ public actor BaselineManager {
 
     /// Get the current git commit hash.
     private func getCurrentGitCommit() -> String? {
+        #if os(macOS)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         process.arguments = ["rev-parse", "--short", "HEAD"]
@@ -199,6 +200,10 @@ public actor BaselineManager {
         } catch {
             return nil
         }
+        #else
+        // Process is not available on iOS/tvOS/watchOS
+        return nil
+        #endif
     }
 }
 
