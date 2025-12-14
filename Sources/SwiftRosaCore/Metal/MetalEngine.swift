@@ -154,15 +154,20 @@ public actor MetalEngine {
 
         // Load shader library - try multiple approaches
         do {
-            // 1. Try pre-compiled metallib from build plugin output
-            if let libraryURL = Bundle.module.url(forResource: "default", withExtension: "metallib") {
+            // 1. Try pre-compiled metallib from build plugin output (SwiftRosaCore.metallib)
+            //    Using target-specific name to avoid conflicts with xcodebuild's auto Metal compilation
+            if let libraryURL = Bundle.module.url(forResource: "SwiftRosaCore", withExtension: "metallib") {
                 self.library = try device.makeLibrary(URL: libraryURL)
             }
-            // 2. Try default library from bundle (Xcode projects)
+            // 2. Fall back to default.metallib (for compatibility with xcodebuild builds)
+            else if let libraryURL = Bundle.module.url(forResource: "default", withExtension: "metallib") {
+                self.library = try device.makeLibrary(URL: libraryURL)
+            }
+            // 3. Try default library from bundle (Xcode projects)
             else if let lib = try? device.makeDefaultLibrary(bundle: Bundle.module) {
                 self.library = lib
             }
-            // 3. FAIL FAST - don't attempt runtime compilation (it hangs)
+            // 4. FAIL FAST - don't attempt runtime compilation (it hangs)
             else {
                 throw MetalEngineError.libraryLoadFailed(
                     "No pre-compiled Metal library found. Ensure MetalCompilerPlugin ran during build."

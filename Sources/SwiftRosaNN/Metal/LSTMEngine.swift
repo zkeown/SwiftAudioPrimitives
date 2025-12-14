@@ -137,13 +137,23 @@ public actor LSTMEngine {
         }
         self.commandQueue = commandQueue
 
-        // Load shader library
+        // Load shader library - try multiple approaches
         do {
-            if let libraryURL = Bundle.module.url(forResource: "default", withExtension: "metallib") {
+            // 1. Try target-specific metallib from build plugin output
+            //    Using target-specific name to avoid conflicts with xcodebuild's auto Metal compilation
+            if let libraryURL = Bundle.module.url(forResource: "SwiftRosaNN", withExtension: "metallib") {
                 self.library = try device.makeLibrary(URL: libraryURL)
-            } else if let lib = try? device.makeDefaultLibrary(bundle: Bundle.module) {
+            }
+            // 2. Fall back to default.metallib (for compatibility with xcodebuild builds)
+            else if let libraryURL = Bundle.module.url(forResource: "default", withExtension: "metallib") {
+                self.library = try device.makeLibrary(URL: libraryURL)
+            }
+            // 3. Try default library from bundle (Xcode projects)
+            else if let lib = try? device.makeDefaultLibrary(bundle: Bundle.module) {
                 self.library = lib
-            } else {
+            }
+            // 4. FAIL FAST - don't attempt runtime compilation (it hangs)
+            else {
                 throw LSTMEngineError.libraryLoadFailed(
                     "No pre-compiled Metal library found. Ensure Metal shaders are compiled."
                 )
