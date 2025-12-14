@@ -10,8 +10,9 @@ struct MetalCompilerPlugin: BuildToolPlugin {
         let metalFiles = target.sourceFiles.filter { $0.path.extension == "metal" }
         guard !metalFiles.isEmpty else { return [] }
 
-        let airPath = context.pluginWorkDirectory.appending("Shaders.air")
-        let metallibPath = context.pluginWorkDirectory.appending("default.metallib")
+        // Use target-specific name to avoid conflicts with xcodebuild's Metal compilation
+        let airPath = context.pluginWorkDirectory.appending("\(target.name)Shaders.air")
+        let metallibPath = context.pluginWorkDirectory.appending("\(target.name).metallib")
 
         // Build arguments for metal compiler
         var metalArgs = ["-c"]
