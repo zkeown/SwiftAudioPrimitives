@@ -237,91 +237,56 @@ public struct SpectralFeatures: Sendable {
         let centroids = centroid(magnitudeSpec: magnitudeSpec)
         let nFreqs = magnitudeSpec.count
         let nFrames = magnitudeSpec[0].count
-        let invP = 1.0 / p
+        let p64 = Double(p)
+        let invP64 = 1.0 / p64
+
+        // Use Float64 accumulation for improved precision (matches centroid/rolloff/flatness)
+        // This reduces accumulated rounding error across frequency bins
 
         // First compute per-frame normalization factors (L1 norm of each frame's spectrum)
-        var normFactors = [Float](repeating: 0, count: nFrames)
+        var normFactors64 = [Double](repeating: 0, count: nFrames)
         if norm {
             for f in 0..<nFreqs {
                 magnitudeSpec[f].withUnsafeBufferPointer { magRowPtr in
-                    normFactors.withUnsafeMutableBufferPointer { nfPtr in
-                        vDSP_vadd(nfPtr.baseAddress!, 1, magRowPtr.baseAddress!, 1, nfPtr.baseAddress!, 1, vDSP_Length(nFrames))
+                    for t in 0..<nFrames {
+                        normFactors64[t] += Double(magRowPtr[t])
                     }
                 }
             }
             // Invert non-zero factors
             for t in 0..<nFrames {
-                normFactors[t] = normFactors[t] > 0 ? 1.0 / normFactors[t] : 0
+                normFactors64[t] = normFactors64[t] > 0 ? 1.0 / normFactors64[t] : 0
             }
         }
 
-        // Row-wise accumulation of weighted deviation^p
+        // Accumulate weighted deviation^p in Float64
         // For each frequency f, for each frame t:
         //   contribution = |freq[f] - centroid[t]|^p * mag[f][t] * normFactor[t]
-        var weightedSums = [Float](repeating: 0, count: nFrames)
-
-        // Temporary buffers for per-row processing
-        var deviations = [Float](repeating: 0, count: nFrames)
-        var weightedRow = [Float](repeating: 0, count: nFrames)
+        var weightedSums64 = [Double](repeating: 0, count: nFrames)
 
         for f in 0..<nFreqs {
-            let freq = frequencies[f]
+            let freq64 = Double(frequencies[f])
 
-            // Compute |freq - centroid[t]| for all frames
-            centroids.withUnsafeBufferPointer { centPtr in
-                deviations.withUnsafeMutableBufferPointer { devPtr in
-                    var negFreq = -freq
-                    // deviations = centroid - freq
-                    vDSP_vsadd(centPtr.baseAddress!, 1, &negFreq, devPtr.baseAddress!, 1, vDSP_Length(nFrames))
-                    // deviations = |deviations|
-                    vDSP_vabs(devPtr.baseAddress!, 1, devPtr.baseAddress!, 1, vDSP_Length(nFrames))
-                }
-            }
-
-            // Compute deviation^p
-            if p == 2.0 {
-                vDSP_vsq(deviations, 1, &deviations, 1, vDSP_Length(nFrames))
-            } else {
-                var pVar = p
-                var n = Int32(nFrames)
-                vvpowsf(&deviations, &pVar, deviations, &n)
-            }
-
-            // Multiply by magnitude row: deviation^p * mag[f][:]
             magnitudeSpec[f].withUnsafeBufferPointer { magRowPtr in
-                weightedRow.withUnsafeMutableBufferPointer { wrPtr in
-                    vDSP_vmul(deviations, 1, magRowPtr.baseAddress!, 1, wrPtr.baseAddress!, 1, vDSP_Length(nFrames))
-                }
-            }
+                for t in 0..<nFrames {
+                    let centroid64 = Double(centroids[t])
+                    let deviation = abs(freq64 - centroid64)
+                    let deviationPowP = pow(deviation, p64)
+                    let mag64 = Double(magRowPtr[t])
 
-            // If normalizing, multiply by normFactors
-            if norm {
-                weightedRow.withUnsafeMutableBufferPointer { wrPtr in
-                    normFactors.withUnsafeBufferPointer { nfPtr in
-                        vDSP_vmul(wrPtr.baseAddress!, 1, nfPtr.baseAddress!, 1, wrPtr.baseAddress!, 1, vDSP_Length(nFrames))
+                    if norm {
+                        weightedSums64[t] += deviationPowP * mag64 * normFactors64[t]
+                    } else {
+                        weightedSums64[t] += deviationPowP * mag64
                     }
                 }
             }
-
-            // Accumulate into weightedSums
-            weightedSums.withUnsafeMutableBufferPointer { wsPtr in
-                weightedRow.withUnsafeBufferPointer { wrPtr in
-                    vDSP_vadd(wsPtr.baseAddress!, 1, wrPtr.baseAddress!, 1, wsPtr.baseAddress!, 1, vDSP_Length(nFrames))
-                }
-            }
         }
 
-        // Take p-th root of accumulated sums
+        // Take p-th root and convert back to Float32
         var result = [Float](repeating: 0, count: nFrames)
-        if p == 2.0 {
-            // Fast path: sqrt
-            var n = Int32(nFrames)
-            vvsqrtf(&result, weightedSums, &n)
-        } else {
-            // General: pow(x, 1/p)
-            for t in 0..<nFrames {
-                result[t] = pow(weightedSums[t], invP)
-            }
+        for t in 0..<nFrames {
+            result[t] = Float(pow(weightedSums64[t], invP64))
         }
 
         return result
@@ -825,72 +790,41 @@ public struct SpectralFeatures: Sendable {
         let centroids = centroidContiguous(magnitudeSpec: magnitudeSpec)
         let nFreqs = magnitudeSpec.rows
         let nFrames = magnitudeSpec.cols
-        let invP = 1.0 / p
-
-        // Relative noise floor threshold (same as non-contiguous version)
-        let noiseFloorThreshold: Float = 1e-4
+        let p64 = Double(p)
+        let invP64 = 1.0 / p64
 
         var result = [Float](repeating: 0, count: nFrames)
 
         magnitudeSpec.data.withUnsafeBufferPointer { magPtr in
-            frequencies.withUnsafeBufferPointer { freqPtr in
-                for t in 0..<nFrames {
-                    let cent = centroids[t]
+            for t in 0..<nFrames {
+                let cent64 = Double(centroids[t])
 
-                    // Extract column into workspace (required for subsequent operations)
+                // Compute L1 norm for normalization in Float64
+                var normFactor64: Double = 1.0
+                if norm {
+                    var sum64: Double = 0
                     for f in 0..<nFreqs {
-                        workspace.magCol[f] = magPtr[f * nFrames + t]
+                        sum64 += Double(magPtr[f * nFrames + t])
                     }
+                    normFactor64 = sum64 > 0 ? 1.0 / sum64 : 0
+                }
 
-                    // Apply relative noise floor threshold to suppress FFT numerical noise
-                    var maxMag: Float = 0
-                    vDSP_maxv(workspace.magCol, 1, &maxMag, vDSP_Length(nFreqs))
-                    let threshold = maxMag * noiseFloorThreshold
-                    for f in 0..<nFreqs {
-                        if workspace.magCol[f] < threshold {
-                            workspace.magCol[f] = 0
-                        }
-                    }
+                // Accumulate weighted deviation^p in Float64
+                var weightedSum64: Double = 0
+                for f in 0..<nFreqs {
+                    let freq64 = Double(frequencies[f])
+                    let mag64 = Double(magPtr[f * nFrames + t])
+                    let deviation = abs(freq64 - cent64)
+                    let deviationPowP = pow(deviation, p64)
 
-                    // L1 normalize the magnitude column if requested (librosa default: norm=True)
                     if norm {
-                        var sum: Float = 0
-                        vDSP_sve(workspace.magCol, 1, &sum, vDSP_Length(nFreqs))
-                        if sum > 0 {
-                            var invSum = 1.0 / sum
-                            vDSP_vsmul(workspace.magCol, 1, &invSum, &workspace.magCol, 1, vDSP_Length(nFreqs))
-                        }
-                    }
-
-                    // Compute deviations: |freq - centroid|
-                    var negCent = -cent
-                    vDSP_vsadd(freqPtr.baseAddress!, 1, &negCent, &workspace.deviations, 1, vDSP_Length(nFreqs))
-                    vDSP_vabs(workspace.deviations, 1, &workspace.deviations, 1, vDSP_Length(nFreqs))
-
-                    // Compute deviation^p
-                    if p == 2.0 {
-                        vDSP_vsq(workspace.deviations, 1, &workspace.deviations, 1, vDSP_Length(nFreqs))
+                        weightedSum64 += deviationPowP * mag64 * normFactor64
                     } else {
-                        var pVar = p
-                        var n = Int32(nFreqs)
-                        vvpowsf(&workspace.deviations, &pVar, workspace.deviations, &n)
-                    }
-
-                    // Compute weighted sum
-                    var weightedSum: Float = 0
-                    vDSP_dotpr(workspace.deviations, 1, workspace.magCol, 1, &weightedSum, vDSP_Length(nFreqs))
-
-                    // For normalized spectra, total weight = 1.0
-                    if norm {
-                        result[t] = pow(weightedSum, invP)
-                    } else {
-                        var totalWeight: Float = 0
-                        vDSP_sve(workspace.magCol, 1, &totalWeight, vDSP_Length(nFreqs))
-                        if totalWeight > 0 {
-                            result[t] = pow(weightedSum / totalWeight, invP)
-                        }
+                        weightedSum64 += deviationPowP * mag64
                     }
                 }
+
+                result[t] = Float(pow(weightedSum64, invP64))
             }
         }
 

@@ -84,11 +84,14 @@ public struct BeatTracker: Sendable {
     /// - Parameter config: Configuration.
     public init(config: BeatTrackerConfig = BeatTrackerConfig()) {
         self.config = config
+        // Use librosa-compatible onset strength for best accuracy
+        // This uses log-compressed mel spectrogram which produces normalized values
+        // suitable for the CV-based rhythm detection checks in estimateTempo
         self.onsetDetector = OnsetDetector(config: OnsetConfig(
             sampleRate: config.sampleRate,
             hopLength: config.hopLength,
             nFFT: 2048,
-            method: .spectralFlux,
+            method: .librosa,
             peakThreshold: 0.3,
             preMax: 3,
             postMax: 3,
@@ -101,31 +104,28 @@ public struct BeatTracker: Sendable {
 
     /// Estimate tempo in BPM.
     ///
+    /// Uses librosa-compatible tempogram algorithm:
+    /// 1. Compute onset strength envelope
+    /// 2. Compute local autocorrelation (tempogram) for each frame
+    /// 3. Aggregate tempogram across time with mean
+    /// 4. Apply log-normal prior and select best tempo
+    ///
     /// - Parameter signal: Input audio signal.
     /// - Returns: Estimated tempo in beats per minute, or 0 if no clear rhythm detected.
     public func estimateTempo(_ signal: [Float]) async -> Float {
         // Compute onset strength
-        let rawOnsetEnvelope = await onsetDetector.onsetStrength(signal)
-        guard rawOnsetEnvelope.count > 10 else { return 0 }
-
-        // Trim edge frames to remove start/end transients that can cause false tempo detection
-        // Steady signals (like multi_tone) have large spikes only at start/end
-        let trimFrames = min(5, rawOnsetEnvelope.count / 10)
-        let onsetEnvelope = Array(rawOnsetEnvelope.dropFirst(trimFrames).dropLast(trimFrames))
+        let onsetEnvelope = await onsetDetector.onsetStrength(signal)
         guard onsetEnvelope.count > 10 else { return 0 }
 
         // Check if onset envelope has sufficient energy
-        // Very low onset activity means no meaningful rhythm
         var maxOnset: Float = 0
         vDSP_maxv(onsetEnvelope, 1, &maxOnset, vDSP_Length(onsetEnvelope.count))
-        let minOnsetStrength: Float = 0.1  // Minimum onset envelope max for tempo detection
+        let minOnsetStrength: Float = 0.1
         if maxOnset < minOnsetStrength {
-            return 0  // Too weak onset activity for tempo
+            return 0
         }
 
-        // Check for periodic content - compute coefficient of variation
-        // A steady signal with no rhythm has very low CV (all values similar)
-        // A rhythmic signal has high CV (peaks and valleys)
+        // Check for periodic content - coefficient of variation
         var mean: Float = 0
         vDSP_meanv(onsetEnvelope, 1, &mean, vDSP_Length(onsetEnvelope.count))
         var variance: Float = 0
@@ -134,59 +134,192 @@ public struct BeatTracker: Sendable {
             variance += diff * diff
         }
         variance /= Float(onsetEnvelope.count)
-        let stdDev = sqrt(variance)
-        let cv = mean > 0.001 ? stdDev / mean : 0
-
-        // Low CV means nearly constant envelope - no rhythm
-        // Rhythmic signals typically have CV > 1.0 (std dev larger than mean)
-        if cv < 0.5 {
-            return 0  // Envelope too flat, no clear rhythm
+        let cv = mean > 0.001 ? sqrt(variance) / mean : 0
+        if cv < 0.25 {
+            return 0
         }
 
-        // Compute autocorrelation
-        let autocorr = computeAutocorrelation(onsetEnvelope)
-        guard !autocorr.isEmpty else { return 0 }
-
-        // Find peaks in tempo range
-        let minLag = Int(config.bpmToFrames(config.bpmRange.max))
+        // Tempo range in lags
+        let minLag = max(1, Int(config.bpmToFrames(config.bpmRange.max)))
         let maxLag = Int(config.bpmToFrames(config.bpmRange.min))
 
-        var bestLag = 0
-        var bestValue: Float = 0
+        // Compute tempogram (per-frame local autocorrelation) matching librosa
+        // librosa uses win_length=384 by default
+        let winLength = 384
+        let tempogram = computeTempogram(onsetEnvelope, windowLength: winLength, maxLag: maxLag)
 
-        for lag in minLag..<min(maxLag, autocorr.count) {
-            if autocorr[lag] > bestValue {
-                bestValue = autocorr[lag]
+        guard !tempogram.isEmpty else { return 0 }
+
+        // Aggregate tempogram with mean (librosa default)
+        var aggregatedTG = [Float](repeating: 0, count: maxLag)
+        let nFrames = tempogram.count
+        for lag in 0..<maxLag {
+            var sum: Float = 0
+            for frame in 0..<nFrames {
+                if lag < tempogram[frame].count {
+                    sum += tempogram[frame][lag]
+                }
+            }
+            aggregatedTG[lag] = sum / Float(nFrames)
+        }
+
+        // Compute BPM values for each lag
+        var bpms = [Float](repeating: 0, count: maxLag)
+        for lag in 1..<maxLag {
+            bpms[lag] = config.framesToBPM(Float(lag))
+        }
+
+        // Apply log-normal tempo prior (exact librosa formula)
+        // logprior = -0.5 * ((log2(bpm) - log2(start_bpm)) / std_bpm)^2
+        let logStartBPM = log2(config.startBPM)
+        let stdBPM: Float = 1.0  // librosa default
+
+        var logPrior = [Float](repeating: -Float.infinity, count: maxLag)
+        for lag in minLag..<maxLag {
+            let logBPM = log2(bpms[lag])
+            let diff = (logBPM - logStartBPM) / stdBPM
+            logPrior[lag] = -0.5 * diff * diff
+        }
+
+        // Find best tempo: argmax(log1p(1e6 * tg) + logprior)
+        var bestLag = 0
+        var bestScore: Float = -Float.infinity
+
+        for lag in minLag..<maxLag {
+            let logTG = log1p(1e6 * max(0, aggregatedTG[lag]))
+            let score = logTG + logPrior[lag]
+            if score > bestScore {
+                bestScore = score
                 bestLag = lag
             }
         }
 
-        // Reject weak tempo estimates
-        // librosa uses similar logic - check if autocorrelation peak is strong enough
-        let minTempoStrength: Float = 0.15  // 15% of max autocorr (which is normalized to 1.0)
-        if bestValue < minTempoStrength || bestLag == 0 {
-            return 0  // No confident tempo detected
-        }
-
-        // Also check peak prominence - the tempo lag should have a clear peak
-        // compared to the overall autocorrelation energy in the tempo range
-        var sumInRange: Float = 0
-        var countInRange = 0
-        for lag in minLag..<min(maxLag, autocorr.count) {
-            sumInRange += autocorr[lag]
-            countInRange += 1
-        }
-        let avgInRange = countInRange > 0 ? sumInRange / Float(countInRange) : 0
-        let peakRatio = avgInRange > 0 ? bestValue / avgInRange : 0
-
-        // Peak should be significantly above average in tempo range
-        // Increased from 1.5 to 2.0 to reduce false positives on steady signals
-        if peakRatio < 2.0 {  // Peak not prominent enough relative to noise floor
+        // Reject weak estimates where autocorrelation peak is below noise threshold
+        if bestLag == 0 || aggregatedTG[bestLag] < 0.01 {
             return 0
         }
 
-        // Convert lag to BPM
-        return config.framesToBPM(Float(bestLag))
+        return bpms[bestLag]
+    }
+
+    /// Compute tempogram (local autocorrelation at each frame)
+    /// Matches librosa.feature.tempogram with center=True (default)
+    private func computeTempogram(_ onsetEnvelope: [Float], windowLength: Int, maxLag: Int) -> [[Float]] {
+        let n = onsetEnvelope.count
+        guard n > 0 else { return [] }
+
+        // center=True: pad onset envelope with win_length//2 on each side
+        let padLength = windowLength / 2
+        var paddedEnvelope = [Float](repeating: 0, count: n + 2 * padLength)
+        // Edge padding (reflect mode) - use first/last values
+        for i in 0..<padLength {
+            paddedEnvelope[i] = onsetEnvelope[0]
+        }
+        for i in 0..<n {
+            paddedEnvelope[padLength + i] = onsetEnvelope[i]
+        }
+        for i in 0..<padLength {
+            paddedEnvelope[padLength + n + i] = onsetEnvelope[n - 1]
+        }
+
+        // Pre-compute Hann window with fftbins=True (asymmetric, periodic)
+        // librosa uses scipy.signal.get_window(window, win_length, fftbins=True)
+        var hannWindow = [Float](repeating: 0, count: windowLength)
+        for i in 0..<windowLength {
+            // Periodic Hann (fftbins=True): divide by N instead of N-1
+            hannWindow[i] = 0.5 * (1.0 - cos(2.0 * Float.pi * Float(i) / Float(windowLength)))
+        }
+
+        // Number of output frames = n (original length, after trimming back)
+        var tempogram = [[Float]]()
+        tempogram.reserveCapacity(n)
+
+        // For each frame, compute local autocorrelation
+        // Frame extraction: frame i starts at position i in padded envelope
+        for frameIdx in 0..<n {
+            let frameStart = frameIdx
+
+            // Extract frame and apply Hann window
+            var windowedFrame = [Float](repeating: 0, count: windowLength)
+            for i in 0..<windowLength {
+                windowedFrame[i] = paddedEnvelope[frameStart + i] * hannWindow[i]
+            }
+
+            // Compute autocorrelation for this windowed frame
+            let autocorr = computeLocalAutocorrelation(windowedFrame, maxLag: min(maxLag, windowLength))
+            tempogram.append(autocorr)
+        }
+
+        return tempogram
+    }
+
+    /// Compute normalized autocorrelation for a single frame using FFT (matches librosa.autocorrelate)
+    private func computeLocalAutocorrelation(_ frame: [Float], maxLag: Int) -> [Float] {
+        let n = frame.count
+        guard n > 1 else { return [Float](repeating: 0, count: maxLag) }
+
+        // FFT-based autocorrelation (Wiener-Khinchin theorem)
+        // Pad to 2*n-1 (or next power of 2 for efficiency)
+        let fftLength = 1 << Int(ceil(log2(Double(2 * n - 1))))
+
+        var paddedFrame = [Float](repeating: 0, count: fftLength)
+        for i in 0..<n {
+            paddedFrame[i] = frame[i]
+        }
+
+        // Forward FFT
+        var realPart = paddedFrame
+        var imagPart = [Float](repeating: 0, count: fftLength)
+
+        let log2n = vDSP_Length(log2(Double(fftLength)))
+        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
+            return [Float](repeating: 0, count: maxLag)
+        }
+        defer { vDSP_destroy_fftsetup(fftSetup) }
+
+        realPart.withUnsafeMutableBufferPointer { realPtr in
+            imagPart.withUnsafeMutableBufferPointer { imagPtr in
+                var split = DSPSplitComplex(realp: realPtr.baseAddress!, imagp: imagPtr.baseAddress!)
+                vDSP_fft_zip(fftSetup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+            }
+        }
+
+        // Power spectrum: |FFT|^2
+        var power = [Float](repeating: 0, count: fftLength)
+        for i in 0..<fftLength {
+            power[i] = realPart[i] * realPart[i] + imagPart[i] * imagPart[i]
+        }
+
+        // Inverse FFT of power spectrum
+        realPart = power
+        imagPart = [Float](repeating: 0, count: fftLength)
+        realPart.withUnsafeMutableBufferPointer { realPtr in
+            imagPart.withUnsafeMutableBufferPointer { imagPtr in
+                var split = DSPSplitComplex(realp: realPtr.baseAddress!, imagp: imagPtr.baseAddress!)
+                vDSP_fft_zip(fftSetup, &split, 1, log2n, FFTDirection(FFT_INVERSE))
+            }
+        }
+
+        // Scale by FFT length
+        var scale = 1.0 / Float(fftLength)
+        vDSP_vsmul(realPart, 1, &scale, &realPart, 1, vDSP_Length(fftLength))
+
+        // Extract autocorrelation values up to maxLag
+        var autocorr = [Float](repeating: 0, count: maxLag)
+        let limitLag = min(maxLag, n)
+        for i in 0..<limitLag {
+            autocorr[i] = realPart[i]
+        }
+
+        // L-infinity normalization (librosa default: divide by max absolute value)
+        var maxVal: Float = 0
+        vDSP_maxmgv(autocorr, 1, &maxVal, vDSP_Length(maxLag))
+        if maxVal > 0 {
+            var invMax = 1.0 / maxVal
+            vDSP_vsmul(autocorr, 1, &invMax, &autocorr, 1, vDSP_Length(maxLag))
+        }
+
+        return autocorr
     }
 
     /// Track beats in audio.
@@ -220,32 +353,6 @@ public struct BeatTracker: Sendable {
     }
 
     // MARK: - Private Implementation
-
-    private func computeAutocorrelation(_ signal: [Float]) -> [Float] {
-        let n = signal.count
-        let maxLag = min(n, Int(config.bpmToFrames(config.bpmRange.min)) + 100)
-
-        var autocorr = [Float](repeating: 0, count: maxLag)
-
-        // Compute autocorrelation for each lag
-        for lag in 0..<maxLag {
-            var sum: Float = 0
-            for i in 0..<(n - lag) {
-                sum += signal[i] * signal[i + lag]
-            }
-            autocorr[lag] = sum / Float(n - lag)
-        }
-
-        // Normalize
-        if autocorr[0] > 0 {
-            let scale = 1.0 / autocorr[0]
-            for i in 0..<maxLag {
-                autocorr[i] *= scale
-            }
-        }
-
-        return autocorr
-    }
 
     private func trackBeats(_ onsetEnvelope: [Float], periodFrames: Float) -> [Int] {
         let n = onsetEnvelope.count

@@ -47,12 +47,11 @@ public struct ValidationTolerances {
     /// in the overlap-add phase - now matches librosa's tolerance!
     public static let istftReconstruction: Double = 1e-6
 
-    /// CQT magnitude: multi-resolution FFT
-    /// Note: Higher tolerance due to algorithmic differences between time-domain
-    /// correlation (our implementation) and FFT-based convolution (librosa).
-    /// Our implementation correctly identifies spectral peaks but has different
-    /// spectral leakage characteristics in off-peak bins.
-    public static let cqtMagnitude: Double = 0.05
+    /// CQT magnitude: multi-resolution correlation
+    /// Improved from 0.05 to 0.02 after fixing L1 normalization to match librosa.
+    /// Time-domain correlation with proper sqrt(filterLength) * sqrt(downsampleFactor) / L1norm
+    /// scaling now produces magnitudes within 2% of librosa.
+    public static let cqtMagnitude: Double = 0.02
 
     /// VQT magnitude: variable-Q multi-resolution
     public static let vqtMagnitude: Double = 1e-4
@@ -78,11 +77,11 @@ public struct ValidationTolerances {
     public static let spectralCentroid: Double = 5e-5
 
     /// Spectral bandwidth: weighted std with L1 normalization.
-    /// Note: Higher tolerance than other spectral features due to vDSP FFT producing
-    /// ~16x more numerical noise at high frequencies than scipy. This noise gets
-    /// amplified by squared deviations in the bandwidth calculation.
-    /// This is inherent to Float32 FFT precision, not a bug.
-    /// CANNOT BE TIGHTENED - fundamental Float32 FFT limitation.
+    /// Now uses Float64 accumulation matching centroid/rolloff/flatness.
+    /// Note: Higher tolerance than other spectral features because bandwidth is
+    /// sensitive to numerical noise in off-peak bins, especially for narrow-band
+    /// signals like pure tones. For broadband signals (white noise), error is <5%.
+    /// Pure sine worst case: ~14% error due to tiny noise bins dominating deviation calculation.
     public static let spectralBandwidth: Double = 0.16
 
     /// Spectral rolloff: threshold search

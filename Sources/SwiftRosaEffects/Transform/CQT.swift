@@ -404,12 +404,15 @@ public struct CQT: Sendable {
         )
     }
 
-    /// Process one octave writing directly to flat output arrays for thread safety.
+    /// Process one octave using time-domain correlation with L1-normalized filters.
+    ///
+    /// This matches librosa's default norm=1 behavior where filters are normalized
+    /// so that their L1 norm (sum of absolute window values) equals 1.
     ///
     /// Key optimizations:
     /// - Direct writes to pre-allocated flat arrays (no intermediate allocations)
     /// - vDSP_dotpr for vectorized dot products
-    /// - Pre-computed normalization factors
+    /// - Pre-computed L1 normalization factors
     private func processOctaveParallel(
         octave: OctaveParams,
         signal: [Float],
@@ -438,12 +441,17 @@ public struct CQT: Sendable {
         // Frame scale factor (octave frame index -> output frame index)
         let frameScale = Float(nFrames) / Float(octaveFrames)
 
-        // Pre-compute normalization factors for each filter
+        // Pre-compute normalization factors
+        // For librosa compatibility with norm=1:
+        // - Divide by L1 norm (sum of window values) for L1 normalization
+        // - Multiply by sqrt(filterLength) to compensate for energy in longer filters
+        // - Multiply by sqrt(downsampleFactor) to compensate for energy loss from decimation
+        // This matches librosa's internal scaling: basis *= lengths / float(n_fft)
         let normFactors: [Float] = octave.filters.map { filter in
             if filter.l1Norm > 0 {
-                let sqrtLen = sqrt(Float(filter.filterLength))
-                let sqrtDS = sqrt(Float(octave.downsampleFactor))
-                return sqrtLen * sqrtDS / filter.l1Norm
+                let energyScale = sqrt(Float(filter.filterLength))
+                let downsampleScale = sqrt(Float(octave.downsampleFactor))
+                return energyScale * downsampleScale / filter.l1Norm
             }
             return 1.0
         }
@@ -476,6 +484,8 @@ public struct CQT: Sendable {
                             }
 
                             // Compute correlation using vectorized dot products
+                            // CQT correlation: sum(signal * conj(filter))
+                            // = sum(signal * filterReal) - i * sum(signal * filterImag)
                             var sumReal: Float = 0
                             var sumImag: Float = 0
 
@@ -487,7 +497,7 @@ public struct CQT: Sendable {
                             vDSP_dotpr(sig, 1, fI, 1, &sumImag, vDSP_Length(filterLen))
                             sumImag = -sumImag
 
-                            // Write directly to flat output arrays
+                            // Apply L1 normalization to match librosa norm=1
                             flatReal[outOffset + outFrame] = sumReal * normFactor
                             flatImag[outOffset + outFrame] = sumImag * normFactor
                         }
