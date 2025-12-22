@@ -186,6 +186,53 @@ SwiftRosa is designed to produce outputs compatible with [librosa](https://libro
 - STFT uses centered frames with reflect padding
 - Reference validation tests ensure numerical compatibility
 
+## Validation
+
+SwiftRosa includes comprehensive validation tests against librosa reference data. For basic validation, the standard test suite runs automatically:
+
+```bash
+swift test
+```
+
+### Real Audio Validation (Optional)
+
+For additional validation against real music audio, you can run tests using the [MUSDB18-HQ](https://sigsep.github.io/datasets/musdb.html) dataset.
+
+**Setup:**
+
+1. **Download MUSDB18-HQ** (requires free registration):
+   - Visit <https://zenodo.org/record/3338373>
+   - Download and extract to a local directory (e.g., `~/datasets/musdb18hq`)
+
+2. **Install Python dependencies:**
+
+   ```bash
+   pip install librosa musdb numpy soundfile
+   ```
+
+3. **Generate reference data:**
+
+   ```bash
+   python scripts/generate_real_audio_reference.py --musdb-path ~/datasets/musdb18hq
+   ```
+
+   This creates `Tests/RealAudioValidation/ReferenceData/musdb18_reference.json` (~50-100MB)
+
+4. **Run real audio validation tests:**
+
+   ```bash
+   swift test --filter RealAudioValidation
+   ```
+
+**What gets validated:**
+
+The real audio tests validate SwiftRosa against librosa using 14 diverse audio clips from MUSDB18-HQ:
+
+- 10 full mixes spanning rock, jazz, electronic, folk, orchestral
+- 4 isolated stems (drums, vocals, bass, other)
+
+Features tested: STFT, Mel spectrogram, MFCC, CQT, Chroma (STFT and CQT), spectral features (centroid, bandwidth, rolloff, flatness), RMS, zero crossing rate, onset strength, onset detection, and tempo estimation.
+
 ## Use Case: Music Source Separation
 
 ```swift

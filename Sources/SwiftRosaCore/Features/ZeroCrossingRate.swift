@@ -28,20 +28,27 @@ public struct ZeroCrossingRate: Sendable {
     /// Whether to center frames by padding.
     public let center: Bool
 
+    /// Threshold for treating values as zero (matches librosa default of 1e-10).
+    /// Values with absolute value <= threshold are treated as zero.
+    public let threshold: Float
+
     /// Create a zero-crossing rate extractor.
     ///
     /// - Parameters:
     ///   - frameLength: Frame length in samples (default: 2048).
     ///   - hopLength: Hop length between frames (default: 512).
     ///   - center: Center frames by padding (default: true).
+    ///   - threshold: Values within this threshold are treated as zero (default: 1e-10).
     public init(
         frameLength: Int = 2048,
         hopLength: Int = 512,
-        center: Bool = true
+        center: Bool = true,
+        threshold: Float = 1e-10
     ) {
         self.frameLength = frameLength
         self.hopLength = hopLength
         self.center = center
+        self.threshold = threshold
     }
 
     /// Compute frame-wise zero-crossing rate.
@@ -68,24 +75,27 @@ public struct ZeroCrossingRate: Sendable {
         let n = paddedSignal.count - 1
         guard n > 0 else { return [Float](repeating: 0, count: nFrames) }
 
-        // Step 1: Compute sign products for entire signal (vectorized)
-        var signProduct = [Float](repeating: 0, count: n)
-        paddedSignal.withUnsafeBufferPointer { sigPtr in
-            signProduct.withUnsafeMutableBufferPointer { prodPtr in
-                vDSP_vmul(
-                    sigPtr.baseAddress!, 1,
-                    sigPtr.baseAddress! + 1, 1,
-                    prodPtr.baseAddress!, 1,
-                    vDSP_Length(n)
-                )
-            }
-        }
-
-        // Step 2: Create binary crossing indicators
-        // signProduct < 0 means crossing occurred
+        // Step 1: Compute crossings using librosa's signbit method with zero_pos=True
+        // librosa clips values within threshold to 0, then treats 0 as positive (signbit=false)
+        // A crossing occurs when signbit(x[i]) != signbit(x[i-1])
+        // With zero_pos=True: signbit is true only for negative values (not zero)
         var crossings = [Float](repeating: 0, count: n)
-        for i in 0..<n {
-            crossings[i] = signProduct[i] < 0 ? 1.0 : 0.0
+        let thresh = threshold
+        paddedSignal.withUnsafeBufferPointer { sigPtr in
+            crossings.withUnsafeMutableBufferPointer { crossPtr in
+                for i in 0..<n {
+                    // Clip values within threshold to zero
+                    let x0 = abs(sigPtr[i]) <= thresh ? Float(0) : sigPtr[i]
+                    let x1 = abs(sigPtr[i + 1]) <= thresh ? Float(0) : sigPtr[i + 1]
+
+                    // signbit: true for negative, false for zero/positive (zero_pos=True)
+                    let sign0 = x0 < 0
+                    let sign1 = x1 < 0
+
+                    // Crossing when signs differ
+                    crossPtr[i] = sign0 != sign1 ? 1.0 : 0.0
+                }
+            }
         }
 
         // Step 3: Compute cumulative sum
@@ -126,31 +136,28 @@ public struct ZeroCrossingRate: Sendable {
 
     /// Compute zero-crossing rate of entire signal.
     ///
-    /// - Parameter signal: Input audio signal.
+    /// - Parameters:
+    ///   - signal: Input audio signal.
+    ///   - threshold: Values within this threshold are treated as zero (default: 1e-10).
     /// - Returns: Zero-crossing rate (0 to 1).
-    public static func compute(_ signal: [Float]) -> Float {
+    public static func compute(_ signal: [Float], threshold: Float = 1e-10) -> Float {
         guard signal.count > 1 else { return 0 }
 
         let n = signal.count - 1
 
-        // Compute x[i] * x[i-1] - negative values indicate zero crossings
-        var signProduct = [Float](repeating: 0, count: n)
-
-        signal.withUnsafeBufferPointer { signalPtr in
-            signProduct.withUnsafeMutableBufferPointer { prodPtr in
-                vDSP_vmul(
-                    signalPtr.baseAddress!, 1,      // x[i-1]
-                    signalPtr.baseAddress! + 1, 1,  // x[i]
-                    prodPtr.baseAddress!, 1,
-                    vDSP_Length(n)
-                )
-            }
-        }
-
-        // Count zero crossings (product < 0)
+        // Count zero crossings using librosa's signbit method with zero_pos=True
         var crossings: Int = 0
         for i in 0..<n {
-            if signProduct[i] < 0 {
+            // Clip values within threshold to zero
+            let x0 = abs(signal[i]) <= threshold ? Float(0) : signal[i]
+            let x1 = abs(signal[i + 1]) <= threshold ? Float(0) : signal[i + 1]
+
+            // signbit: true for negative, false for zero/positive (zero_pos=True)
+            let sign0 = x0 < 0
+            let sign1 = x1 < 0
+
+            // Crossing when signs differ
+            if sign0 != sign1 {
                 crossings += 1
             }
         }
@@ -187,49 +194,54 @@ public struct ZeroCrossingRate: Sendable {
 
     /// Count zero crossings in a signal.
     ///
-    /// - Parameter signal: Input audio signal.
+    /// - Parameters:
+    ///   - signal: Input audio signal.
+    ///   - threshold: Values within this threshold are treated as zero (default: 1e-10).
     /// - Returns: Total number of zero crossings.
-    public static func count(_ signal: [Float]) -> Int {
+    public static func count(_ signal: [Float], threshold: Float = 1e-10) -> Int {
         guard signal.count > 1 else { return 0 }
 
         let n = signal.count - 1
+        var crossings: Int = 0
 
-        return signal.withUnsafeBufferPointer { signalPtr in
-            var signProduct = [Float](repeating: 0, count: n)
+        for i in 0..<n {
+            // Clip values within threshold to zero
+            let x0 = abs(signal[i]) <= threshold ? Float(0) : signal[i]
+            let x1 = abs(signal[i + 1]) <= threshold ? Float(0) : signal[i + 1]
 
-            return signProduct.withUnsafeMutableBufferPointer { prodPtr in
-                vDSP_vmul(
-                    signalPtr.baseAddress!, 1,
-                    signalPtr.baseAddress! + 1, 1,
-                    prodPtr.baseAddress!, 1,
-                    vDSP_Length(n)
-                )
+            // signbit: true for negative, false for zero/positive (zero_pos=True)
+            let sign0 = x0 < 0
+            let sign1 = x1 < 0
 
-                // Count zero crossings (product < 0)
-                var crossings: Int = 0
-                for i in 0..<n {
-                    if prodPtr[i] < 0 {
-                        crossings += 1
-                    }
-                }
-                return crossings
+            // Crossing when signs differ
+            if sign0 != sign1 {
+                crossings += 1
             }
         }
+        return crossings
     }
 
     /// Find zero-crossing positions in a signal.
     ///
-    /// - Parameter signal: Input audio signal.
+    /// - Parameters:
+    ///   - signal: Input audio signal.
+    ///   - threshold: Values within this threshold are treated as zero (default: 1e-10).
     /// - Returns: Array of sample indices where zero crossings occur.
-    public static func positions(_ signal: [Float]) -> [Int] {
+    public static func positions(_ signal: [Float], threshold: Float = 1e-10) -> [Int] {
         guard signal.count > 1 else { return [] }
 
         var positions = [Int]()
 
         for i in 1..<signal.count {
-            let sign1 = signal[i - 1] >= 0
-            let sign2 = signal[i] >= 0
-            if sign1 != sign2 {
+            // Clip values within threshold to zero
+            let x0 = abs(signal[i - 1]) <= threshold ? Float(0) : signal[i - 1]
+            let x1 = abs(signal[i]) <= threshold ? Float(0) : signal[i]
+
+            // signbit: true for negative, false for zero/positive (zero_pos=True)
+            // A crossing occurs when one is negative and the other is not
+            let sign0 = x0 < 0
+            let sign1 = x1 < 0
+            if sign0 != sign1 {
                 positions.append(i)
             }
         }

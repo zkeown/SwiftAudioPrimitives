@@ -161,5 +161,18 @@ let package = Package(
             path: "Tests/SwiftRosaBenchmarks",
             resources: [.copy("ReferenceTimings")]
         ),
+
+        // MARK: - Real Audio Validation (optional - requires MUSDB18-HQ reference data)
+        // Run with: swift test --filter RealAudioValidation
+        .testTarget(
+            name: "RealAudioValidation",
+            dependencies: [
+                "SwiftRosaCore",
+                "SwiftRosaAnalysis",
+                "SwiftRosaEffects",
+            ],
+            path: "Tests/RealAudioValidation",
+            resources: [.copy("ReferenceData")]
+        ),
     ]
 )

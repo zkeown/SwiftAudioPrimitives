@@ -194,6 +194,8 @@ docs/generated/
 # ===================
 # This file is regenerated in CI from librosa
 Tests/SwiftRosaCoreTests/ReferenceData/librosa_reference.json
+# Real audio validation reference (generated locally from MUSDB18-HQ dataset)
+Tests/RealAudioValidation/ReferenceData/musdb18_reference.json
 api_coverage.md
 
 # ===================
