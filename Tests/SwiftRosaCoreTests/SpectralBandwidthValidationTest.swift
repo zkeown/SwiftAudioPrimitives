@@ -19,7 +19,8 @@ final class SpectralBandwidthValidationTest: XCTestCase {
 
         // librosa reference: 11.86 Hz for 440Hz pure sine
         let expectedBW: Float = 11.86
-        let tolerance: Float = Float(ValidationTolerances.spectralBandwidth)  // 1e-4
+        // Use narrowband tolerance for pure tones (sensitive to FFT noise)
+        let tolerance: Float = Float(ValidationTolerances.spectralBandwidthNarrowband)
 
         let error = abs(bw[frameIdx] - expectedBW) / expectedBW
         print("Spectral bandwidth validation:")

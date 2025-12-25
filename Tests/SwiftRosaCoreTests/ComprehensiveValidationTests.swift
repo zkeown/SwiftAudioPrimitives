@@ -737,24 +737,36 @@ final class ComprehensiveValidationTests: XCTestCase {
             let result = try await cqt.transform(signal)
             let magnitude = result.magnitude
 
-            // Use correlation-based comparison for CQT
-            // This measures whether spectral peaks are in the right places,
-            // which is more meaningful than exact value matching given the
-            // algorithmic differences between time-domain and FFT-based CQT.
+            // Validate CQT using correlation (spectral shape matching)
+            //
+            // **KNOWN LIMITATION**: SwiftRosa's time-domain CQT has significant magnitude
+            // differences vs librosa's FFT-based CQT (10-20x off). However, the spectral
+            // *shape* (peak locations, relative patterns) matches well (>85% correlation).
+            //
+            // For now, we validate shape only. Magnitude accuracy is tracked but not enforced.
+            // TODO: Investigate CQT magnitude normalization to match librosa.
             let framesToCompare = min(expectedMag.count, magnitude.first?.count ?? 0)
             let binsToCompare = min(expectedMag.first?.count ?? 0, magnitude.count)
 
             var totalCorrelation: Float = 0
             var frameCount = 0
+            var maxRelError: Double = 0
 
             for frameIdx in 0..<framesToCompare {
-                // Flatten this frame for correlation
                 var expectedFrame = [Float]()
                 var actualFrame = [Float]()
 
                 for binIdx in 0..<binsToCompare {
-                    expectedFrame.append(Float(expectedMag[frameIdx][binIdx]))
+                    let expected = expectedMag[frameIdx][binIdx]
+                    let actual = Double(magnitude[binIdx][frameIdx])
+                    expectedFrame.append(Float(expected))
                     actualFrame.append(magnitude[binIdx][frameIdx])
+
+                    // Track relative error for significant values (diagnostic only)
+                    if expected > 0.01 {
+                        let relError = abs(expected - actual) / expected
+                        maxRelError = max(maxRelError, relError)
+                    }
                 }
 
                 let corr = ValidationHelpers.correlation(expectedFrame, actualFrame)
@@ -765,14 +777,17 @@ final class ComprehensiveValidationTests: XCTestCase {
             }
 
             let avgCorrelation = frameCount > 0 ? totalCorrelation / Float(frameCount) : 0
-            let correlationThreshold: Float = 0.85  // Require 85% correlation
-            let passed = avgCorrelation >= correlationThreshold
 
-            recordResult("cqt", signal: signalName, passed: passed, tolerance: Double(correlationThreshold), error: Double(1 - avgCorrelation),
-                        message: passed ? "" : "Avg correlation=\(avgCorrelation)")
+            // Correlation threshold: 0.85 for chirp (more challenging), 0.95 for others
+            let correlationThreshold: Float = signalName == "chirp" ? 0.85 : 0.95
+
+            // Report magnitude error but don't enforce (known limitation)
+            recordResult("cqt", signal: signalName, passed: avgCorrelation >= correlationThreshold,
+                        tolerance: tolerance, error: maxRelError,
+                        message: avgCorrelation >= correlationThreshold ? "shape OK, magnitude \(Int(maxRelError * 100))% off" : "correlation=\(avgCorrelation)")
 
             XCTAssertGreaterThanOrEqual(avgCorrelation, correlationThreshold,
-                "CQT \(signalName) average correlation \(avgCorrelation) below threshold")
+                "CQT \(signalName) correlation \(avgCorrelation) below threshold \(correlationThreshold)")
         }
     }
 
