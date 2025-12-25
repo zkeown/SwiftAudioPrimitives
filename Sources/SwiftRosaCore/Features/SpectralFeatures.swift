@@ -146,7 +146,7 @@ public struct SpectralFeatures: Sendable {
     public init(config: SpectralFeaturesConfig = SpectralFeaturesConfig()) {
         self.config = config
         self.stft = STFT(config: STFTConfig(
-            nFFT: config.nFFT,
+            uncheckedNFFT: config.nFFT,
             hopLength: config.hopLength,
             winLength: config.nFFT,
             windowType: config.windowType,

@@ -16,7 +16,7 @@ final class MemoryBenchmarkTests: XCTestCase {
 
     func testSTFTMemoryUsage_10s() async throws {
         let signal = generateTestSignal(length: 220500)
-        let stft = STFT(config: STFTConfig(nFFT: 2048))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
         let runner = BenchmarkRunner(config: .memoryFocused)
 
         let result = try await runner.run(
@@ -47,7 +47,7 @@ final class MemoryBenchmarkTests: XCTestCase {
 
     func testSTFTMemoryUsage_60s() async throws {
         let signal = generateTestSignal(length: 1323000)
-        let stft = STFT(config: STFTConfig(nFFT: 2048))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
         let runner = BenchmarkRunner(config: .memoryFocused)
 
         let result = try await runner.run(
@@ -71,12 +71,12 @@ final class MemoryBenchmarkTests: XCTestCase {
     func testGriffinLimMemoryUsage() async throws {
         // Generate a magnitude spectrogram for reconstruction
         let signal = generateTestSignal(length: 110250) // 5s
-        let stft = STFT(config: STFTConfig(nFFT: 2048))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
         let spectrogram = await stft.transform(signal)
         let magnitude = spectrogram.magnitude
 
         let griffinLim = GriffinLim(
-            config: STFTConfig(nFFT: 2048),
+            config: STFTConfig(uncheckedNFFT: 2048),
             nIter: 32,
             momentum: 0.99
         )
@@ -109,7 +109,7 @@ final class MemoryBenchmarkTests: XCTestCase {
     // MARK: - Streaming Memory Tests
 
     func testStreamingSTFTMemoryGrowth() async throws {
-        let streaming = StreamingSTFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
+        let streaming = StreamingSTFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512))
         let memoryTracker = MemoryTracker()
 
         await memoryTracker.begin()
@@ -121,7 +121,7 @@ final class MemoryBenchmarkTests: XCTestCase {
         var totalFrames = 0
         for i in 0..<totalChunks {
             let chunk = generateTestSignal(length: chunkSize, offset: i * chunkSize)
-            await streaming.push(chunk)
+            try await streaming.push(chunk)
             let frames = await streaming.popFrames()
             totalFrames += frames.count
 
@@ -229,7 +229,7 @@ final class MemoryBenchmarkTests: XCTestCase {
 
         // STFT 10s
         let signal10s = generateTestSignal(length: 220500)
-        let stft = STFT(config: STFTConfig(nFFT: 2048))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
 
         let stftResult = try await runner.run(
             name: "STFT_10s_Baseline",

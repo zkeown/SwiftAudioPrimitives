@@ -64,7 +64,7 @@ public struct PhaseVocoder: Sendable {
         self.config = config
 
         let stftConfig = STFTConfig(
-            nFFT: config.nFFT,
+            uncheckedNFFT: config.nFFT,
             hopLength: config.hopLength,
             winLength: config.nFFT,
             windowType: config.windowType,

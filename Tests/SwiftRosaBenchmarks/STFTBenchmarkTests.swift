@@ -38,7 +38,7 @@ final class STFTBenchmarkTests: XCTestCase {
 
     func testSTFTPerformance_1s() async throws {
         let signal = Self.signal1s
-        let stft = STFT(config: STFTConfig(nFFT: 2048))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
         let runner = BenchmarkRunner(config: .thorough)
 
         let result = try await runner.run(
@@ -61,7 +61,7 @@ final class STFTBenchmarkTests: XCTestCase {
 
     func testSTFTPerformance_10s() async throws {
         let signal = Self.signal10s
-        let stft = STFT(config: STFTConfig(nFFT: 2048))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
         let runner = BenchmarkRunner(config: .thorough)
 
         let result = try await runner.run(
@@ -84,7 +84,7 @@ final class STFTBenchmarkTests: XCTestCase {
 
     func testSTFTPerformance_60s() async throws {
         let signal = Self.signal60s
-        let stft = STFT(config: STFTConfig(nFFT: 2048))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
         let runner = BenchmarkRunner(config: BenchmarkConfiguration(
             warmupIterations: 2,
             measureIterations: 5,
@@ -112,7 +112,7 @@ final class STFTBenchmarkTests: XCTestCase {
         let fftSizes = [1024, 2048, 4096]
 
         for nFFT in fftSizes {
-            let stft = STFT(config: STFTConfig(nFFT: nFFT))
+            let stft = STFT(config: STFTConfig(uncheckedNFFT: nFFT))
 
             let result = try await runner.run(
                 name: "STFT_nFFT\(nFFT)",
@@ -131,8 +131,8 @@ final class STFTBenchmarkTests: XCTestCase {
 
     func testISTFTPerformance() async throws {
         let signal = Self.signal10s
-        let stft = STFT(config: STFTConfig(nFFT: 2048))
-        let istft = ISTFT(config: STFTConfig(nFFT: 2048))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
+        let istft = ISTFT(config: STFTConfig(uncheckedNFFT: 2048))
         let runner = BenchmarkRunner(config: .thorough)
 
         // First compute STFT
@@ -154,8 +154,8 @@ final class STFTBenchmarkTests: XCTestCase {
 
     func testRoundTripPerformance() async throws {
         let signal = Self.signal10s
-        let stft = STFT(config: STFTConfig(nFFT: 2048))
-        let istft = ISTFT(config: STFTConfig(nFFT: 2048))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
+        let istft = ISTFT(config: STFTConfig(uncheckedNFFT: 2048))
         let runner = BenchmarkRunner(config: .thorough)
 
         let result = try await runner.run(
@@ -218,7 +218,7 @@ final class STFTBenchmarkTests: XCTestCase {
         var results: [BenchmarkResult] = []
 
         for (name, signal) in signals {
-            let stft = STFT(config: STFTConfig(nFFT: 2048))
+            let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
 
             let result = try await runner.run(
                 name: "STFT_\(name)",

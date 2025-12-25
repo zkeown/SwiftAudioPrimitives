@@ -91,7 +91,7 @@ final class MissingValidationTests: XCTestCase {
         // PolyFeatures works on magnitude spectrogram, not raw signal
         // First compute STFT magnitude
         let signal = TestSignalGenerator.sine(frequency: 440, sampleRate: 22050, duration: 0.5)
-        let stftConfig = STFTConfig(nFFT: 2048, hopLength: 512)
+        let stftConfig = STFTConfig(uncheckedNFFT: 2048, hopLength: 512)
         let stft = STFT(config: stftConfig)
         let magnitude = await stft.magnitude(signal)
 
@@ -114,7 +114,7 @@ final class MissingValidationTests: XCTestCase {
 
         // Compute magnitude spectrogram first
         let signal = TestSignalGenerator.chirp(fmin: 100, fmax: 4000, sampleRate: 22050, duration: 0.5)
-        let stftConfig = STFTConfig(nFFT: 2048, hopLength: 512)
+        let stftConfig = STFTConfig(uncheckedNFFT: 2048, hopLength: 512)
         let stft = STFT(config: stftConfig)
         let magnitude = await stft.magnitude(signal)
 
@@ -517,7 +517,7 @@ final class MissingValidationTests: XCTestCase {
                        "2x stretch should double length")
 
         // Stretched signal should preserve pitch (frequency content)
-        let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512))
         let origSpec = await stft.transform(signal)
         let stretchedSpec = await stft.transform(stretched)
 

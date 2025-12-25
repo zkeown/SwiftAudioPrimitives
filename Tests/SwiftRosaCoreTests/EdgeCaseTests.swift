@@ -14,14 +14,14 @@ final class EdgeCaseTests: XCTestCase {
 
     func testSTFTEmptySignal() async {
         // With center=false, empty signal should produce nothing
-        let stft = STFT(config: STFTConfig(nFFT: 256, hopLength: 64, center: false))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 256, hopLength: 64, center: false))
         let result = await stft.transform([])
 
         XCTAssertEqual(result.cols, 0, "Empty signal without centering should produce no frames")
 
         // With center=true (default), empty signal gets padded - but still no useful content
         // The key is that no crash occurs and output is valid
-        let stftCentered = STFT(config: STFTConfig(nFFT: 256, hopLength: 64, center: true))
+        let stftCentered = STFT(config: STFTConfig(uncheckedNFFT: 256, hopLength: 64, center: true))
         let resultCentered = await stftCentered.transform([])
 
         // Verify no NaN/Inf even with empty input
@@ -33,7 +33,7 @@ final class EdgeCaseTests: XCTestCase {
     }
 
     func testSTFTSingleSample() async {
-        let stft = STFT(config: STFTConfig(nFFT: 256, hopLength: 64))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 256, hopLength: 64))
         let result = await stft.transform([1.0])
 
         // With center=true (default), single sample gets padded and produces frames
@@ -51,7 +51,7 @@ final class EdgeCaseTests: XCTestCase {
 
     func testSTFTExactlyNFFTSamples() async {
         let nFFT = 256
-        let stft = STFT(config: STFTConfig(nFFT: nFFT, hopLength: nFFT / 4, center: false))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: nFFT, hopLength: nFFT / 4, center: false))
 
         // Signal exactly nFFT samples
         let signal = [Float](repeating: 1.0, count: nFFT)
@@ -61,7 +61,7 @@ final class EdgeCaseTests: XCTestCase {
         XCTAssertEqual(result.cols, 1, "Exactly nFFT samples without centering should give 1 frame")
 
         // With centering
-        let stftCentered = STFT(config: STFTConfig(nFFT: nFFT, hopLength: nFFT / 4, center: true))
+        let stftCentered = STFT(config: STFTConfig(uncheckedNFFT: nFFT, hopLength: nFFT / 4, center: true))
         let resultCentered = await stftCentered.transform(signal)
         XCTAssertGreaterThan(resultCentered.cols, 0, "Centered STFT should produce frames")
     }
@@ -69,7 +69,7 @@ final class EdgeCaseTests: XCTestCase {
     func testSTFTNFFTPlusOneSamples() async {
         let nFFT = 256
         let hopLength = nFFT / 4
-        let stft = STFT(config: STFTConfig(nFFT: nFFT, hopLength: hopLength, center: false))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: nFFT, hopLength: hopLength, center: false))
 
         // nFFT + 1 samples
         let signal = [Float](repeating: 1.0, count: nFFT + 1)
@@ -116,7 +116,7 @@ final class EdgeCaseTests: XCTestCase {
         let nSamples = 1024
         let signal = [Float](repeating: 0, count: nSamples)
 
-        let stft = STFT(config: STFTConfig(nFFT: 256, hopLength: 64))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 256, hopLength: 64))
         let result = await stft.transform(signal)
 
         // All zeros input should produce all zeros output (or near zero)
@@ -138,7 +138,7 @@ final class EdgeCaseTests: XCTestCase {
         let nSamples = 1024
         let signal = [Float](repeating: 1.0, count: nSamples)
 
-        let stft = STFT(config: STFTConfig(nFFT: 256, hopLength: 64))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 256, hopLength: 64))
         let result = await stft.transform(signal)
 
         // Verify no NaN/Inf
@@ -162,7 +162,7 @@ final class EdgeCaseTests: XCTestCase {
             signal[i] = i % 2 == 0 ? 1.0 : -1.0
         }
 
-        let stft = STFT(config: STFTConfig(nFFT: 256, hopLength: 64))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 256, hopLength: 64))
         let result = await stft.transform(signal)
 
         // This is Nyquist frequency content
@@ -224,7 +224,7 @@ final class EdgeCaseTests: XCTestCase {
 
     func testSTFTMinimumNFFT() async {
         // nFFT = 4 is practical minimum for power-of-2 FFT
-        let stft = STFT(config: STFTConfig(nFFT: 4, hopLength: 2))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 4, hopLength: 2))
         let signal: [Float] = [1, 2, 3, 4, 5, 6, 7, 8]
         let result = await stft.transform(signal)
 
@@ -234,7 +234,7 @@ final class EdgeCaseTests: XCTestCase {
 
     func testSTFTHopLengthOne() async {
         // Maximum overlap
-        let stft = STFT(config: STFTConfig(nFFT: 64, hopLength: 1, center: false))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 64, hopLength: 1, center: false))
         let signal = [Float](repeating: 1.0, count: 128)
         let result = await stft.transform(signal)
 
@@ -296,7 +296,7 @@ final class EdgeCaseTests: XCTestCase {
 
         let originalEnergy = signal.reduce(0) { $0 + $1 * $1 }
 
-        let stftConfig = STFTConfig(nFFT: 512, hopLength: 128)
+        let stftConfig = STFTConfig(uncheckedNFFT: 512, hopLength: 128)
         let stft = STFT(config: stftConfig)
         let istft = ISTFT(config: stftConfig)
 
@@ -320,7 +320,7 @@ final class EdgeCaseTests: XCTestCase {
             magnitude.append([Float](repeating: 0, count: nFrames))
         }
 
-        let stftConfig = STFTConfig(nFFT: 256, hopLength: 64)
+        let stftConfig = STFTConfig(uncheckedNFFT: 256, hopLength: 64)
         let griffinLim = GriffinLim(config: stftConfig, nIter: 10)
         let reconstructed = await griffinLim.reconstruct(magnitude, length: 1024)
 
@@ -362,12 +362,12 @@ final class EdgeCaseTests: XCTestCase {
 
     // MARK: - Streaming Edge Cases
 
-    func testStreamingSTFTSingleSample() async {
-        let config = STFTConfig(nFFT: 256, hopLength: 64)
+    func testStreamingSTFTSingleSample() async throws {
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64)
         let streaming = StreamingSTFT(config: config)
 
         // Push single sample
-        await streaming.push([1.0])
+        try await streaming.push([1.0])
 
         // Try to pop frames (should be empty since we don't have enough samples)
         let frames = await streaming.popFrames()
@@ -375,12 +375,12 @@ final class EdgeCaseTests: XCTestCase {
         XCTAssertTrue(frames.isEmpty || frames.count >= 0, "Should handle single sample gracefully")
     }
 
-    func testStreamingSTFTEmptyInput() async {
-        let config = STFTConfig(nFFT: 256, hopLength: 64)
+    func testStreamingSTFTEmptyInput() async throws {
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64)
         let streaming = StreamingSTFT(config: config)
 
         // Push empty array
-        await streaming.push([])
+        try await streaming.push([])
         let frames = await streaming.popFrames()
         XCTAssertTrue(frames.isEmpty, "Empty input should produce empty output")
     }

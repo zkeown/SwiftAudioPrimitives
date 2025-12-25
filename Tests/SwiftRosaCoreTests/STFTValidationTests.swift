@@ -85,7 +85,7 @@ final class STFTValidationTests: XCTestCase {
 
         // Compute STFT
         let config = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             winLength: nFFT,
             windowType: .hann,
@@ -159,7 +159,7 @@ final class STFTValidationTests: XCTestCase {
         let signal = try loadSignalFromReference("multi_tone")
 
         let config = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             windowType: .hann,
             center: true,
@@ -204,7 +204,7 @@ final class STFTValidationTests: XCTestCase {
         let signal = try loadSignalFromReference("chirp")
 
         let config = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             windowType: .hann,
             center: true,
@@ -250,7 +250,7 @@ final class STFTValidationTests: XCTestCase {
         let signal = TestSignalGenerator.sine(frequency: 440)
 
         let config = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             windowType: .hann,
             center: true,
@@ -290,7 +290,7 @@ final class STFTValidationTests: XCTestCase {
         let signal = TestSignalGenerator.multiTone()
 
         let config = STFTConfig(
-            nFFT: 2048,
+            uncheckedNFFT: 2048,
             hopLength: 512,
             windowType: .hann,
             center: true,
@@ -321,7 +321,7 @@ final class STFTValidationTests: XCTestCase {
         let signal = TestSignalGenerator.chirp()
 
         let config = STFTConfig(
-            nFFT: 2048,
+            uncheckedNFFT: 2048,
             hopLength: 512,
             windowType: .hann,
             center: true,
@@ -355,7 +355,7 @@ final class STFTValidationTests: XCTestCase {
 
         for nFFT in [512, 1024, 2048, 4096] {
             let config = STFTConfig(
-                nFFT: nFFT,
+                uncheckedNFFT: nFFT,
                 hopLength: nFFT / 4,
                 windowType: .hann,
                 center: true,
@@ -397,7 +397,7 @@ final class STFTValidationTests: XCTestCase {
 
         for windowType in windowTypes {
             let config = STFTConfig(
-                nFFT: 1024,
+                uncheckedNFFT: 1024,
                 hopLength: 256,
                 windowType: windowType,
                 center: true,
@@ -440,7 +440,7 @@ final class STFTValidationTests: XCTestCase {
         print("FFT SCALE DEBUG - Testing with 440Hz sine wave from reference data")
 
         // Test with n_fft=2048 (same as mel test)
-        let config2048 = STFTConfig(nFFT: 2048, hopLength: 512, center: true)
+        let config2048 = STFTConfig(uncheckedNFFT: 2048, hopLength: 512, center: true)
         let stft2048 = STFT(config: config2048)
         let result2048 = await stft2048.transform(sineSignal)
         let mag2048 = result2048.magnitude
@@ -465,7 +465,7 @@ final class STFTValidationTests: XCTestCase {
         signal[nSamples / 2] = 1.0
 
         // Test with n_fft=1024
-        let config1024 = STFTConfig(nFFT: 1024, hopLength: 256, center: true)
+        let config1024 = STFTConfig(uncheckedNFFT: 1024, hopLength: 256, center: true)
         let stft1024 = STFT(config: config1024)
         let result1024 = await stft1024.transform(signal)
         let centerFrame1024 = result1024.cols / 2
@@ -476,7 +476,7 @@ final class STFTValidationTests: XCTestCase {
         print("  Expected (librosa): ~[0.997, 0.997, 0.997, 0.997, 0.997]")
 
         // Test with n_fft=2048 (impulse)
-        let config2048Impulse = STFTConfig(nFFT: 2048, hopLength: 512, center: true)
+        let config2048Impulse = STFTConfig(uncheckedNFFT: 2048, hopLength: 512, center: true)
         let stft2048Impulse = STFT(config: config2048Impulse)
         let result2048Impulse = await stft2048Impulse.transform(signal)
         let centerFrame2048 = result2048Impulse.cols / 2
@@ -498,7 +498,7 @@ final class STFTValidationTests: XCTestCase {
         let signal = TestSignalGenerator.silence()
 
         let config = STFTConfig(
-            nFFT: 1024,
+            uncheckedNFFT: 1024,
             hopLength: 256,
             windowType: .hann,
             center: true,
@@ -523,7 +523,7 @@ final class STFTValidationTests: XCTestCase {
         let signal = TestSignalGenerator.impulse()
 
         let config = STFTConfig(
-            nFFT: 1024,
+            uncheckedNFFT: 1024,
             hopLength: 256,
             windowType: .hann,
             center: true,
@@ -563,7 +563,7 @@ final class STFTValidationTests: XCTestCase {
         let shortSignal: [Float] = Array(TestSignalGenerator.sine(frequency: 440).prefix(512))
 
         let config = STFTConfig(
-            nFFT: 1024,
+            uncheckedNFFT: 1024,
             hopLength: 256,
             windowType: .hann,
             center: true,
@@ -582,7 +582,7 @@ final class STFTValidationTests: XCTestCase {
         let signal = TestSignalGenerator.dcOffset(value: 0.5)
 
         let config = STFTConfig(
-            nFFT: 1024,
+            uncheckedNFFT: 1024,
             hopLength: 256,
             windowType: .hann,
             center: true,
@@ -638,7 +638,7 @@ final class STFTValidationTests: XCTestCase {
         )
 
         // Debug: check power spectrum directly
-        let stft = STFT(config: STFTConfig(nFFT: nFFT, hopLength: hopLength))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: nFFT, hopLength: hopLength))
         let powerSpec = await stft.power(signal)
         print("MEL DEBUG: Power spec shape: [\(powerSpec.count)][\(powerSpec.first?.count ?? 0)]")
         print("MEL DEBUG: Power[0..3][0]: \(powerSpec[0..<3].map { $0[0] })")

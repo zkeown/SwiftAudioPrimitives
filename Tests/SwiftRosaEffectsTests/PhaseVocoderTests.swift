@@ -219,7 +219,7 @@ final class PhaseVocoderTests: XCTestCase {
         let signal = generateSineWave(frequency: 440, duration: 0.5, sampleRate: 22050)
 
         // First get the STFT
-        let stftConfig = STFTConfig(nFFT: 2048, hopLength: 512)
+        let stftConfig = STFTConfig(uncheckedNFFT: 2048, hopLength: 512)
         let stft = STFT(config: stftConfig)
         let spectrogram = await stft.transform(signal)
 

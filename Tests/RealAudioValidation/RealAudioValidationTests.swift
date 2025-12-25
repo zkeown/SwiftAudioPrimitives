@@ -214,7 +214,7 @@ final class RealAudioValidationTests: XCTestCase {
                 continue
             }
 
-            let stft = STFT(config: STFTConfig(nFFT: nFFT, hopLength: hopLength))
+            let stft = STFT(config: STFTConfig(uncheckedNFFT: nFFT, hopLength: hopLength))
             let result = await stft.magnitude(audio)
 
             // Compare shapes

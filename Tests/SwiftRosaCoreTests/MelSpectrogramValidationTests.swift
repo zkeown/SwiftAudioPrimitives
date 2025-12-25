@@ -132,7 +132,7 @@ final class MelSpectrogramValidationTests: XCTestCase {
         }
 
         let config = STFTConfig(
-            nFFT: 2048,
+            uncheckedNFFT: 2048,
             hopLength: 512,
             winLength: nil,
             windowType: .hann,

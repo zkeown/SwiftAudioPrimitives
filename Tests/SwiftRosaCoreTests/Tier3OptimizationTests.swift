@@ -201,7 +201,7 @@ final class Tier3OptimizationTests: XCTestCase {
 
     func testMagnitudeContiguousShape() async {
         let signal = generateTestSignal(length: 8192)
-        let config = STFTConfig(nFFT: 1024, hopLength: 256)
+        let config = STFTConfig(uncheckedNFFT: 1024, hopLength: 256)
         let stft = STFT(config: config)
 
         let mag = await stft.magnitudeContiguous(signal)
@@ -213,7 +213,7 @@ final class Tier3OptimizationTests: XCTestCase {
 
     func testMagnitudeContiguousMatchesRegular() async {
         let signal = generateTestSignal(length: 4096)
-        let config = STFTConfig(nFFT: 512, hopLength: 128)
+        let config = STFTConfig(uncheckedNFFT: 512, hopLength: 128)
         let stft = STFT(config: config)
 
         // Compute both versions
@@ -238,7 +238,7 @@ final class Tier3OptimizationTests: XCTestCase {
 
     func testPowerContiguousMatchesRegular() async {
         let signal = generateTestSignal(length: 4096)
-        let config = STFTConfig(nFFT: 512, hopLength: 128)
+        let config = STFTConfig(uncheckedNFFT: 512, hopLength: 128)
         let stft = STFT(config: config)
 
         let regular = await stft.power(signal)
@@ -260,7 +260,7 @@ final class Tier3OptimizationTests: XCTestCase {
 
     func testTransformContiguousMatchesRegular() async {
         let signal = generateTestSignal(length: 4096)
-        let config = STFTConfig(nFFT: 512, hopLength: 128)
+        let config = STFTConfig(uncheckedNFFT: 512, hopLength: 128)
         let stft = STFT(config: config)
 
         let regular = await stft.transform(signal)
@@ -289,7 +289,7 @@ final class Tier3OptimizationTests: XCTestCase {
     }
 
     func testContiguousEmptySignal() async {
-        let stft = STFT(config: STFTConfig(nFFT: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 512))
 
         let mag = await stft.magnitudeContiguous([])
 
@@ -306,7 +306,7 @@ final class Tier3OptimizationTests: XCTestCase {
         let regular = await spectralFeatures.centroid(signal)
 
         // Get contiguous version
-        let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512))
         let mag = await stft.magnitudeContiguous(signal)
         let contiguous = spectralFeatures.centroidContiguous(magnitudeSpec: mag)
 
@@ -327,7 +327,7 @@ final class Tier3OptimizationTests: XCTestCase {
 
         let regular = await spectralFeatures.bandwidth(signal)
 
-        let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512))
         let mag = await stft.magnitudeContiguous(signal)
         let contiguous = spectralFeatures.bandwidthContiguous(magnitudeSpec: mag)
 
@@ -348,7 +348,7 @@ final class Tier3OptimizationTests: XCTestCase {
 
         let regular = await spectralFeatures.rolloff(signal)
 
-        let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512))
         let mag = await stft.magnitudeContiguous(signal)
         let contiguous = spectralFeatures.rolloffContiguous(magnitudeSpec: mag)
 
@@ -369,7 +369,7 @@ final class Tier3OptimizationTests: XCTestCase {
 
         let regular = await spectralFeatures.flatness(signal)
 
-        let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512))
         let mag = await stft.magnitudeContiguous(signal)
         let contiguous = spectralFeatures.flatnessContiguous(magnitudeSpec: mag)
 
@@ -390,7 +390,7 @@ final class Tier3OptimizationTests: XCTestCase {
 
         let regular = await spectralFeatures.flux(signal)
 
-        let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512))
         let mag = await stft.magnitudeContiguous(signal)
         let contiguous = spectralFeatures.fluxContiguous(magnitudeSpec: mag)
 
@@ -414,7 +414,7 @@ final class Tier3OptimizationTests: XCTestCase {
 
         let regular = await spectralFeatures.contrast(signal)
 
-        let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512))
         let mag = await stft.magnitudeContiguous(signal)
         let contiguous = spectralFeatures.contrastContiguous(magnitudeSpec: mag)
 
@@ -605,7 +605,7 @@ final class Tier3OptimizationTests: XCTestCase {
         )
 
         // CPU FFT via STFT (transform single frame)
-        let stft = STFT(config: STFTConfig(nFFT: n, hopLength: n, windowType: .rectangular, center: false))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: n, hopLength: n, windowType: .rectangular, center: false))
         let cpuResult = await stft.transform(real)
 
         // Compare first nFreqs bins (GPU has full n, CPU has n/2+1)

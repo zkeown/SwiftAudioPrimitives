@@ -97,7 +97,7 @@ public struct HPSS: Sendable {
     ///   - stftConfig: STFT configuration.
     public init(
         hpssConfig: HPSSConfig = HPSSConfig(),
-        stftConfig: STFTConfig = STFTConfig()
+        stftConfig: STFTConfig = .default
     ) {
         self.config = hpssConfig
         self.stftConfig = stftConfig
@@ -418,8 +418,9 @@ extension HPSS {
                 margin: 1.0
             ),
             stftConfig: STFTConfig(
-                nFFT: 2048,
+                uncheckedNFFT: 2048,
                 hopLength: 512,
+                winLength: 2048,
                 windowType: .hann,
                 center: true
             )
@@ -435,8 +436,9 @@ extension HPSS {
                 margin: 1.0
             ),
             stftConfig: STFTConfig(
-                nFFT: 4096,
+                uncheckedNFFT: 4096,
                 hopLength: 1024,
+                winLength: 4096,
                 windowType: .hann,
                 center: true
             )
@@ -452,8 +454,9 @@ extension HPSS {
                 margin: 2.0
             ),
             stftConfig: STFTConfig(
-                nFFT: 2048,
+                uncheckedNFFT: 2048,
                 hopLength: 512,
+                winLength: 2048,
                 windowType: .hann,
                 center: true
             )
@@ -469,8 +472,9 @@ extension HPSS {
                 margin: 1.0
             ),
             stftConfig: STFTConfig(
-                nFFT: 1024,
+                uncheckedNFFT: 1024,
                 hopLength: 256,
+                winLength: 1024,
                 windowType: .hann,
                 center: true
             )

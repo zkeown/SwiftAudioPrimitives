@@ -16,7 +16,7 @@ final class NumericalEdgeCaseTests: XCTestCase {
     // MARK: - Empty Input Tests
 
     func testSTFTEmptyInput() async {
-        let config = STFTConfig(nFFT: 2048, hopLength: 512)
+        let config = STFTConfig(uncheckedNFFT: 2048, hopLength: 512)
         let stft = STFT(config: config)
 
         let result = await stft.transform([])
@@ -72,7 +72,7 @@ final class NumericalEdgeCaseTests: XCTestCase {
     // MARK: - Single Sample Tests
 
     func testSTFTSingleSample() async {
-        let config = STFTConfig(nFFT: 512, hopLength: 256)
+        let config = STFTConfig(uncheckedNFFT: 512, hopLength: 256)
         let stft = STFT(config: config)
 
         let result = await stft.transform([0.5])
@@ -98,7 +98,7 @@ final class NumericalEdgeCaseTests: XCTestCase {
     // MARK: - Silence Tests
 
     func testSTFTSilence() async {
-        let config = STFTConfig(nFFT: 2048, hopLength: 512)
+        let config = STFTConfig(uncheckedNFFT: 2048, hopLength: 512)
         let stft = STFT(config: config)
 
         let silence = [Float](repeating: 0, count: 22050)
@@ -139,7 +139,7 @@ final class NumericalEdgeCaseTests: XCTestCase {
     // MARK: - DC Offset Tests
 
     func testSTFTDCOffset() async {
-        let config = STFTConfig(nFFT: 2048, hopLength: 512)
+        let config = STFTConfig(uncheckedNFFT: 2048, hopLength: 512)
         let stft = STFT(config: config)
 
         // Pure DC signal
@@ -169,7 +169,7 @@ final class NumericalEdgeCaseTests: XCTestCase {
     // MARK: - Very Short Signal Tests
 
     func testSTFTShortSignal() async {
-        let config = STFTConfig(nFFT: 2048, hopLength: 512)
+        let config = STFTConfig(uncheckedNFFT: 2048, hopLength: 512)
         let stft = STFT(config: config)
 
         // Signal shorter than one FFT window
@@ -193,7 +193,7 @@ final class NumericalEdgeCaseTests: XCTestCase {
     // MARK: - Maximum Value Tests
 
     func testSTFTMaxAmplitude() async {
-        let config = STFTConfig(nFFT: 2048, hopLength: 512)
+        let config = STFTConfig(uncheckedNFFT: 2048, hopLength: 512)
         let stft = STFT(config: config)
 
         // Signal at maximum Float value - should not overflow
@@ -213,7 +213,7 @@ final class NumericalEdgeCaseTests: XCTestCase {
     // MARK: - Denormal Value Tests
 
     func testSTFTDenormalValues() async {
-        let config = STFTConfig(nFFT: 512, hopLength: 256)
+        let config = STFTConfig(uncheckedNFFT: 512, hopLength: 256)
         let stft = STFT(config: config)
 
         // Signal with very small (denormal) values
@@ -230,7 +230,7 @@ final class NumericalEdgeCaseTests: XCTestCase {
     // MARK: - Impulse Response Tests
 
     func testSTFTImpulse() async {
-        let config = STFTConfig(nFFT: 2048, hopLength: 512)
+        let config = STFTConfig(uncheckedNFFT: 2048, hopLength: 512)
         let stft = STFT(config: config)
 
         let impulse = TestSignalGenerator.impulse(sampleRate: 22050, duration: 0.5)
@@ -261,7 +261,7 @@ final class NumericalEdgeCaseTests: XCTestCase {
     // MARK: - Phase Continuity Tests
 
     func testSTFTPhaseWrap() async {
-        let config = STFTConfig(nFFT: 2048, hopLength: 512)
+        let config = STFTConfig(uncheckedNFFT: 2048, hopLength: 512)
         let stft = STFT(config: config)
 
         let signal = TestSignalGenerator.sine(frequency: 1000, sampleRate: 22050, duration: 1.0)
@@ -280,7 +280,7 @@ final class NumericalEdgeCaseTests: XCTestCase {
     // MARK: - ISTFT Reconstruction Tests
 
     func testISTFTReconstructionShort() async {
-        let config = STFTConfig(nFFT: 512, hopLength: 128)
+        let config = STFTConfig(uncheckedNFFT: 512, hopLength: 128)
         let stft = STFT(config: config)
         let istft = ISTFT(config: config)
 

@@ -38,7 +38,7 @@ public struct ISTFT: Sendable {
     /// - Parameters:
     ///   - config: STFT configuration (should match the STFT used to create the spectrogram).
     ///   - useGPU: Prefer GPU acceleration when available (default: true).
-    public init(config: STFTConfig = STFTConfig(), useGPU: Bool = true) {
+    public init(config: STFTConfig = .default, useGPU: Bool = true) {
         self.config = config
         self.useGPU = useGPU
         self.window = Windows.generate(config.windowType, length: config.winLength, periodic: true)
@@ -65,7 +65,12 @@ public struct ISTFT: Sendable {
 
         // Initialize Metal engine if GPU is preferred, available, and using float32
         if useGPU && MetalEngine.isAvailable && config.precision == .float32 {
-            self.metalEngine = try? MetalEngine()
+            do {
+                self.metalEngine = try MetalEngine()
+            } catch {
+                logMetal("Failed to initialize Metal engine for ISTFT: \(error). Falling back to CPU.", level: .warning)
+                self.metalEngine = nil
+            }
         } else {
             self.metalEngine = nil
         }

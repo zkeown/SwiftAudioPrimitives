@@ -131,7 +131,7 @@ final class GriffinLimTests: XCTestCase {
         let signal = Self.signal2048
 
         // Compute STFT magnitude
-        let config = STFTConfig(nFFT: 512, hopLength: 128, windowType: .hann)
+        let config = STFTConfig(uncheckedNFFT: 512, hopLength: 128, windowType: .hann)
         let stft = STFT(config: config)
         let spectrogram = await stft.transform(signal)
         let magnitude = spectrogram.magnitude
@@ -168,7 +168,7 @@ final class GriffinLimTests: XCTestCase {
 
     func testReconstructionWithCallback() async {
         let signal = Self.signal1024
-        let config = STFTConfig(nFFT: 256, hopLength: 64)
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64)
         let stft = STFT(config: config)
         let spectrogram = await stft.transform(signal)
 
@@ -216,7 +216,7 @@ final class GriffinLimTests: XCTestCase {
     }
 
     func testCustomConfiguration() {
-        let config = STFTConfig(nFFT: 1024, hopLength: 256)
+        let config = STFTConfig(uncheckedNFFT: 1024, hopLength: 256)
         let griffinLim = GriffinLim(
             config: config,
             nIter: 50,
@@ -235,7 +235,7 @@ final class GriffinLimTests: XCTestCase {
 
     func testConvergenceImproves() async {
         let signal = Self.signal2048Harmonic
-        let config = STFTConfig(nFFT: 512, hopLength: 128)
+        let config = STFTConfig(uncheckedNFFT: 512, hopLength: 128)
         let stft = STFT(config: config)
         let spectrogram = await stft.transform(signal)
         let magnitude = spectrogram.magnitude
@@ -267,7 +267,7 @@ final class GriffinLimTests: XCTestCase {
 
     func testIterationCountsProduceProgressiveImprovement() async {
         let signal = Self.signal1024Harmonic
-        let config = STFTConfig(nFFT: 256, hopLength: 64)
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64)
         let stft = STFT(config: config)
         let spectrogram = await stft.transform(signal)
         let magnitude = spectrogram.magnitude
@@ -302,7 +302,7 @@ final class GriffinLimTests: XCTestCase {
     func testMomentumEffect() async {
         let signal = Self.signal1024
         // Use constant padding for optimal Griffin-Lim convergence
-        let config = STFTConfig(nFFT: 256, hopLength: 64, padMode: .constant(0))
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64, padMode: .constant(0))
         let stft = STFT(config: config)
         let spectrogram = await stft.transform(signal)
         let magnitude = spectrogram.magnitude
@@ -358,7 +358,7 @@ final class GriffinLimTests: XCTestCase {
         // Single frame spectrogram with nFFT=8 -> nFreqs=5 (nFFT/2+1)
         let magnitude: [[Float]] = [[1.0], [0.5], [0.25], [0.1], [0.05]]
 
-        let config = STFTConfig(nFFT: 8, hopLength: 4)
+        let config = STFTConfig(uncheckedNFFT: 8, hopLength: 4)
         let griffinLim = GriffinLim(config: config, nIter: 5)
 
         let result = await griffinLim.reconstruct(magnitude, length: 8)
@@ -377,7 +377,7 @@ final class GriffinLimTests: XCTestCase {
             [0, 0, 0, 0],
         ]
 
-        let config = STFTConfig(nFFT: 8, hopLength: 2)
+        let config = STFTConfig(uncheckedNFFT: 8, hopLength: 2)
         let griffinLim = GriffinLim(config: config, nIter: 5)
 
         let result = await griffinLim.reconstruct(magnitude, length: 10)
@@ -392,7 +392,7 @@ final class GriffinLimTests: XCTestCase {
 
     func testZeroPhaseInitDeterministic() async {
         let signal = Self.signal512
-        let config = STFTConfig(nFFT: 128, hopLength: 32)
+        let config = STFTConfig(uncheckedNFFT: 128, hopLength: 32)
         let stft = STFT(config: config)
         let spectrogram = await stft.transform(signal)
 
@@ -412,7 +412,7 @@ final class GriffinLimTests: XCTestCase {
 
     func testRandomPhaseInitNonDeterministic() async {
         let signal = Self.signal512
-        let config = STFTConfig(nFFT: 128, hopLength: 32)
+        let config = STFTConfig(uncheckedNFFT: 128, hopLength: 32)
         let stft = STFT(config: config)
         let spectrogram = await stft.transform(signal)
 
@@ -444,7 +444,7 @@ final class GriffinLimTests: XCTestCase {
     func testSpectralConvergenceQuality() async {
         let signal = Self.signal4096Harmonic
         // Use constant padding for optimal Griffin-Lim convergence (matches librosa default)
-        let config = STFTConfig(nFFT: 1024, hopLength: 256, windowType: .hann, padMode: .constant(0))
+        let config = STFTConfig(uncheckedNFFT: 1024, hopLength: 256, windowType: .hann, padMode: .constant(0))
         let stft = STFT(config: config)
         let spectrogram = await stft.transform(signal)
         let magnitude = spectrogram.magnitude
@@ -479,7 +479,7 @@ final class GriffinLimTests: XCTestCase {
         }
 
         // Use constant padding for optimal Griffin-Lim convergence
-        let config = STFTConfig(nFFT: 512, hopLength: 128, windowType: .hann, padMode: .constant(0))
+        let config = STFTConfig(uncheckedNFFT: 512, hopLength: 128, windowType: .hann, padMode: .constant(0))
         let stft = STFT(config: config)
         let spectrogram = await stft.transform(signal)
         let magnitude = spectrogram.magnitude
@@ -513,7 +513,7 @@ final class GriffinLimTests: XCTestCase {
     func testSpectralErrorDecreasesTrend() async {
         let signal = Self.signal1024Harmonic
         // Use constant padding for optimal Griffin-Lim convergence
-        let config = STFTConfig(nFFT: 256, hopLength: 64, windowType: .hann, padMode: .constant(0))
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64, windowType: .hann, padMode: .constant(0))
         let stft = STFT(config: config)
         let spectrogram = await stft.transform(signal)
         let magnitude = spectrogram.magnitude
@@ -552,7 +552,7 @@ final class GriffinLimTests: XCTestCase {
     func testWaveformCorrelation() async {
         let signal = Self.signal2048Complex
         // Use constant padding for optimal Griffin-Lim convergence
-        let config = STFTConfig(nFFT: 512, hopLength: 128, windowType: .hann, padMode: .constant(0))
+        let config = STFTConfig(uncheckedNFFT: 512, hopLength: 128, windowType: .hann, padMode: .constant(0))
         let stft = STFT(config: config)
         let spectrogram = await stft.transform(signal)
 
@@ -586,7 +586,7 @@ final class GriffinLimTests: XCTestCase {
         }
 
         // Use constant padding for optimal Griffin-Lim convergence
-        let config = STFTConfig(nFFT: 512, hopLength: 128, windowType: .hann, padMode: .constant(0))
+        let config = STFTConfig(uncheckedNFFT: 512, hopLength: 128, windowType: .hann, padMode: .constant(0))
         let stft = STFT(config: config)
         let spectrogram = await stft.transform(signal)
 
@@ -613,7 +613,7 @@ final class GriffinLimTests: XCTestCase {
     /// STFT -> ISTFT -> STFT should preserve magnitude (up to numerical precision)
     func testSTFTRoundTripPreservesMagnitude() async {
         let signal = Self.signal2048Harmonic
-        let config = STFTConfig(nFFT: 512, hopLength: 128, windowType: .hann)
+        let config = STFTConfig(uncheckedNFFT: 512, hopLength: 128, windowType: .hann)
         let stft = STFT(config: config)
         let istft = ISTFT(config: config)
 
@@ -638,7 +638,7 @@ final class GriffinLimTests: XCTestCase {
     /// Verify that the Griffin-Lim iteration actually decreases error
     func testIterationErrorDecreases() async {
         let signal = Self.signal1024
-        let config = STFTConfig(nFFT: 256, hopLength: 64)
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64)
         let stft = STFT(config: config)
         let spectrogram = await stft.transform(signal)
 
@@ -666,7 +666,7 @@ final class GriffinLimTests: XCTestCase {
     /// Test starting from the true phase - this should give near-zero error
     func testStartingFromTruePhase() async {
         let signal = Self.signal1024
-        let config = STFTConfig(nFFT: 256, hopLength: 64)
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64)
         let stft = STFT(config: config)
         let istft = ISTFT(config: config)
 
@@ -704,7 +704,7 @@ final class GriffinLimTests: XCTestCase {
         for ratio in hopRatios {
             let hopLength = nFFT / ratio
             // Use constant padding for optimal Griffin-Lim convergence
-            let config = STFTConfig(nFFT: nFFT, hopLength: hopLength, windowType: .hann, padMode: .constant(0))
+            let config = STFTConfig(uncheckedNFFT: nFFT, hopLength: hopLength, windowType: .hann, padMode: .constant(0))
             let stft = STFT(config: config)
             let spectrogram = await stft.transform(signal)
 
@@ -743,7 +743,7 @@ final class GriffinLimTests: XCTestCase {
         }
 
         // Use constant (zero) padding like librosa default
-        let config = STFTConfig(nFFT: nFFT, hopLength: hopLength, windowType: .hann, center: true, padMode: .constant(0))
+        let config = STFTConfig(uncheckedNFFT: nFFT, hopLength: hopLength, windowType: .hann, center: true, padMode: .constant(0))
         let stft = STFT(config: config)
         let istft = ISTFT(config: config)
 
@@ -819,7 +819,7 @@ final class GriffinLimTests: XCTestCase {
             signal[i] = Float(drand48() * 2 - 1)
         }
 
-        let config = STFTConfig(nFFT: 256, hopLength: 64)
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64)
         let stft = STFT(config: config)
         let spectrogram = await stft.transform(signal)
 

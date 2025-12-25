@@ -275,7 +275,7 @@ final class LibrosaComparisonTests: XCTestCase {
     func testSTFT_1s_nfft2048() async throws {
         try XCTSkipIf(Self.librosaTimings == nil, "Librosa timings not loaded")
 
-        let stft = STFT(config: STFTConfig(nFFT: 2048))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
         let signal = Self.signal1s
 
         let swiftMs = try await measureSwiftRosa {
@@ -289,7 +289,7 @@ final class LibrosaComparisonTests: XCTestCase {
     func testSTFT_10s_nfft1024() async throws {
         try XCTSkipIf(Self.librosaTimings == nil, "Librosa timings not loaded")
 
-        let stft = STFT(config: STFTConfig(nFFT: 1024))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 1024))
         let signal = Self.signal10s
 
         let swiftMs = try await measureSwiftRosa {
@@ -303,7 +303,7 @@ final class LibrosaComparisonTests: XCTestCase {
     func testSTFT_10s_nfft2048() async throws {
         try XCTSkipIf(Self.librosaTimings == nil, "Librosa timings not loaded")
 
-        let stft = STFT(config: STFTConfig(nFFT: 2048))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
         let signal = Self.signal10s
 
         let swiftMs = try await measureSwiftRosa {
@@ -317,7 +317,7 @@ final class LibrosaComparisonTests: XCTestCase {
     func testSTFT_10s_nfft4096() async throws {
         try XCTSkipIf(Self.librosaTimings == nil, "Librosa timings not loaded")
 
-        let stft = STFT(config: STFTConfig(nFFT: 4096))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 4096))
         let signal = Self.signal10s
 
         let swiftMs = try await measureSwiftRosa {
@@ -331,7 +331,7 @@ final class LibrosaComparisonTests: XCTestCase {
     func testSTFT_60s_nfft2048() async throws {
         try XCTSkipIf(Self.librosaTimings == nil, "Librosa timings not loaded")
 
-        let stft = STFT(config: STFTConfig(nFFT: 2048))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
         let signal = Self.signal60s
 
         let swiftMs = try await measureSwiftRosa(iterations: 5, warmup: 1) {
@@ -347,8 +347,8 @@ final class LibrosaComparisonTests: XCTestCase {
     func testISTFT_10s() async throws {
         try XCTSkipIf(Self.librosaTimings == nil, "Librosa timings not loaded")
 
-        let stft = STFT(config: STFTConfig(nFFT: 2048))
-        let istft = ISTFT(config: STFTConfig(nFFT: 2048))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
+        let istft = ISTFT(config: STFTConfig(uncheckedNFFT: 2048))
         let signal = Self.signal10s
 
         // Pre-compute STFT
@@ -365,8 +365,8 @@ final class LibrosaComparisonTests: XCTestCase {
     func testISTFT_60s() async throws {
         try XCTSkipIf(Self.librosaTimings == nil, "Librosa timings not loaded")
 
-        let stft = STFT(config: STFTConfig(nFFT: 2048))
-        let istft = ISTFT(config: STFTConfig(nFFT: 2048))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048))
+        let istft = ISTFT(config: STFTConfig(uncheckedNFFT: 2048))
         let signal = Self.signal60s
 
         let spectrogram = await stft.transform(signal)

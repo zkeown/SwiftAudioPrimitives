@@ -14,7 +14,7 @@ final class NumericalStabilityTests: XCTestCase {
         let epsilon: Float = 1e-10
         let signal = [Float](repeating: epsilon, count: 1024)
 
-        let config = STFTConfig(nFFT: 256, hopLength: 64)
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64)
         let stft = STFT(config: config)
         let result = await stft.transform(signal)
 
@@ -35,7 +35,7 @@ final class NumericalStabilityTests: XCTestCase {
 
     /// Test ISTFT reconstruction of near-zero magnitude spectrogram
     func testISTFTNearZeroMagnitude() async {
-        let config = STFTConfig(nFFT: 256, hopLength: 64)
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64)
 
         // Create near-zero magnitude spectrogram
         let nFreqs = config.nFFT / 2 + 1
@@ -105,7 +105,7 @@ final class NumericalStabilityTests: XCTestCase {
             signal[i] = amplitude * sin(Float(i) * 0.1)
         }
 
-        let config = STFTConfig(nFFT: 256, hopLength: 64)
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64)
         let stft = STFT(config: config)
         let result = await stft.transform(signal)
 
@@ -122,7 +122,7 @@ final class NumericalStabilityTests: XCTestCase {
     func testRoundTripExtremeAmplitudes() async {
         let amplitudes: [Float] = [1e-6, 1e-4, 1e-2, 1, 10, 100, 1000]
 
-        let config = STFTConfig(nFFT: 256, hopLength: 64, windowType: .hann)
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64, windowType: .hann)
         let stft = STFT(config: config)
         let istft = ISTFT(config: config)
 
@@ -294,7 +294,7 @@ final class NumericalStabilityTests: XCTestCase {
         let nFrames = 16
         let magnitude = [[Float]](repeating: [Float](repeating: 0.5, count: nFrames), count: nFreqs)
 
-        let config = STFTConfig(nFFT: 256, hopLength: 64)
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64)
         let griffinLim = GriffinLim(config: config, nIter: 10, randomPhaseInit: false)
 
         let result = await griffinLim.reconstruct(magnitude, length: 1024)

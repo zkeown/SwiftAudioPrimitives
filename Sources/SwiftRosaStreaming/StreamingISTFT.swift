@@ -28,6 +28,12 @@ import Foundation
 /// let remaining = await streamingISTFT.flush()
 /// ```
 public actor StreamingISTFT {
+    /// Default maximum buffer size (10 MB of Float samples = ~2.5M samples).
+    public static let defaultMaxBufferSize = 10 * 1024 * 1024 / MemoryLayout<Float>.size
+
+    /// Maximum allowed buffer size in samples.
+    public let maxBufferSize: Int
+
     /// Overlap-add buffer for accumulating reconstructed samples.
     private var overlapBuffer: [Float]
 
@@ -62,9 +68,12 @@ public actor StreamingISTFT {
 
     /// Create a streaming ISTFT processor.
     ///
-    /// - Parameter config: STFT configuration (should match the STFT used).
-    public init(config: STFTConfig = STFTConfig()) {
+    /// - Parameters:
+    ///   - config: STFT configuration (should match the STFT used).
+    ///   - maxBufferSize: Maximum buffer size in samples. Defaults to ~2.5M samples (10 MB).
+    public init(config: STFTConfig = .default, maxBufferSize: Int = StreamingISTFT.defaultMaxBufferSize) {
         self.config = config
+        self.maxBufferSize = maxBufferSize
         self.window = Windows.generate(config.windowType, length: config.winLength, periodic: true)
 
         // Pre-compute squared window
@@ -88,7 +97,15 @@ public actor StreamingISTFT {
     ///
     /// - Parameter frames: Array of STFT frames (each as ComplexMatrix with shape (nFreqs, 1)).
     /// - Returns: Reconstructed audio samples that are ready for output.
-    public func push(_ frames: [ComplexMatrix]) -> [Float] {
+    /// - Throws: `StreamingError.bufferOverflow` if the buffer would exceed `maxBufferSize`.
+    public func push(_ frames: [ComplexMatrix]) throws -> [Float] {
+        // Check if processing these frames would exceed our buffer limit
+        let projectedWritePosition = (framesProcessed + frames.count) * config.hopLength + config.winLength
+        let requiredBufferSize = projectedWritePosition - readPosition
+        if requiredBufferSize > maxBufferSize {
+            throw StreamingError.bufferOverflow(requested: requiredBufferSize, max: maxBufferSize)
+        }
+
         for frame in frames {
             processFrame(frame)
         }
@@ -294,8 +311,9 @@ extension StreamingISTFT {
     /// Create a streaming ISTFT with Banquet-compatible settings.
     public static var forBanquet: StreamingISTFT {
         StreamingISTFT(config: STFTConfig(
-            nFFT: 2048,
+            uncheckedNFFT: 2048,
             hopLength: 512,
+            winLength: 2048,
             windowType: .hann,
             center: false
         ))
@@ -329,10 +347,10 @@ public actor StreamingProcessor {
     /// Create a streaming audio processor.
     ///
     /// - Parameter config: STFT configuration.
-    public init(config: STFTConfig = STFTConfig()) {
+    public init(config: STFTConfig = .default) {
         // Use non-centered config for streaming
         let streamConfig = STFTConfig(
-            nFFT: config.nFFT,
+            uncheckedNFFT: config.nFFT,
             hopLength: config.hopLength,
             winLength: config.winLength,
             windowType: config.windowType,
@@ -349,12 +367,13 @@ public actor StreamingProcessor {
     ///   - samples: Input audio samples.
     ///   - transform: Function to transform STFT frames.
     /// - Returns: Processed audio samples.
+    /// - Throws: `StreamingError.bufferOverflow` if either buffer would exceed its limit.
     public func process(
         _ samples: [Float],
         transform: @Sendable ([ComplexMatrix]) -> [ComplexMatrix]
-    ) async -> [Float] {
+    ) async throws -> [Float] {
         // Push to STFT
-        await streamingSTFT.push(samples)
+        try await streamingSTFT.push(samples)
 
         // Get available frames
         let frames = await streamingSTFT.popFrames()
@@ -363,13 +382,15 @@ public actor StreamingProcessor {
         let transformedFrames = transform(frames)
 
         // Push to ISTFT and get output
-        return await streamingISTFT.push(transformedFrames)
+        return try await streamingISTFT.push(transformedFrames)
     }
 
     /// Flush remaining audio at end of stream.
-    public func flush() async -> [Float] {
+    ///
+    /// - Throws: `StreamingError.bufferOverflow` if the ISTFT buffer would exceed its limit.
+    public func flush() async throws -> [Float] {
         let remainingFrames = await streamingSTFT.flush()
-        var output = await streamingISTFT.push(remainingFrames)
+        var output = try await streamingISTFT.push(remainingFrames)
         output.append(contentsOf: await streamingISTFT.flush())
         return output
     }

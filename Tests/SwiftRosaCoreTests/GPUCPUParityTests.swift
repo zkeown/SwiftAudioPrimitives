@@ -151,7 +151,7 @@ final class GPUCPUParityTests: XCTestCase {
         }
 
         // Perform STFT
-        let stftConfig = STFTConfig(nFFT: 1024, hopLength: 256)
+        let stftConfig = STFTConfig(uncheckedNFFT: 1024, hopLength: 256)
         let stft = STFT(config: stftConfig)
         let spectrogram = await stft.transform(signal)
 
@@ -198,7 +198,7 @@ final class GPUCPUParityTests: XCTestCase {
                         0.2 * sin(2 * .pi * 880 * t)
         }
 
-        let stftConfig = STFTConfig(nFFT: 512, hopLength: 128)
+        let stftConfig = STFTConfig(uncheckedNFFT: 512, hopLength: 128)
         let stft = STFT(config: stftConfig)
         let spectrogram = await stft.transform(signal)
 

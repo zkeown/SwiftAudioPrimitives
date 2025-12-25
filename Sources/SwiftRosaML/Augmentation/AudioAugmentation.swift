@@ -49,7 +49,7 @@ public struct AudioAugmentation: Sendable {
     public static func timeStretch(
         _ signal: [Float],
         rate: Float,
-        stftConfig: STFTConfig = STFTConfig(nFFT: 2048, hopLength: 512)
+        stftConfig: STFTConfig = .default
     ) async -> [Float] {
         guard rate > 0 && rate != 1.0 else { return signal }
         guard !signal.isEmpty else { return [] }
@@ -81,7 +81,7 @@ public struct AudioAugmentation: Sendable {
         _ signal: [Float],
         semitones: Float,
         sampleRate: Float = 22050,
-        stftConfig: STFTConfig = STFTConfig(nFFT: 2048, hopLength: 512)
+        stftConfig: STFTConfig = .default
     ) async -> [Float] {
         guard semitones != 0 else { return signal }
         guard !signal.isEmpty else { return [] }

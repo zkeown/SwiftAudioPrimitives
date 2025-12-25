@@ -17,7 +17,7 @@ final class QuickBenchmarkTests: XCTestCase {
             signal[i] = sin(2 * .pi * 440 * t)
         }
 
-        let stftConfig = STFTConfig(nFFT: 2048, hopLength: 512, windowType: .hann, center: true)
+        let stftConfig = STFTConfig(uncheckedNFFT: 2048, hopLength: 512, windowType: .hann, center: true)
         let stft = STFT(config: stftConfig)
         let spectrogram = await stft.transform(signal)
         print("Spectrogram shape: (\(spectrogram.rows), \(spectrogram.cols))")
@@ -55,7 +55,7 @@ final class QuickBenchmarkTests: XCTestCase {
         let chromagram = Chromagram(config: chromaConfig)
 
         // Time STFT separately (4096)
-        let stftConfig = STFTConfig(nFFT: 4096, hopLength: 512, windowType: .hann, center: true)
+        let stftConfig = STFTConfig(uncheckedNFFT: 4096, hopLength: 512, windowType: .hann, center: true)
         let stft = STFT(config: stftConfig)
 
         let stftStart = CFAbsoluteTimeGetCurrent()
@@ -63,7 +63,7 @@ final class QuickBenchmarkTests: XCTestCase {
         let stftTime = (CFAbsoluteTimeGetCurrent() - stftStart) * 1000
 
         // Also time STFT with 2048 for comparison
-        let stftConfig2k = STFTConfig(nFFT: 2048, hopLength: 512, windowType: .hann, center: true)
+        let stftConfig2k = STFTConfig(uncheckedNFFT: 2048, hopLength: 512, windowType: .hann, center: true)
         let stft2k = STFT(config: stftConfig2k)
         let stft2kStart = CFAbsoluteTimeGetCurrent()
         _ = await stft2k.magnitude(signal)

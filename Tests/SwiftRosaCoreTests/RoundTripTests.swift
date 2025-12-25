@@ -34,7 +34,7 @@ final class RoundTripTests: XCTestCase {
 
         // STFT configuration with proper overlap for reconstruction (75% overlap with Hann)
         let config = STFTConfig(
-            nFFT: 1024,
+            uncheckedNFFT: 1024,
             hopLength: 256,  // 75% overlap = nFFT/4
             windowType: .hann,
             center: true
@@ -79,7 +79,7 @@ final class RoundTripTests: XCTestCase {
         }
 
         let config = STFTConfig(
-            nFFT: 512,
+            uncheckedNFFT: 512,
             hopLength: 128,  // 75% overlap
             windowType: .hann,
             center: true
@@ -125,7 +125,7 @@ final class RoundTripTests: XCTestCase {
 
         for (windowType, expectedMaxError, description) in windowConfigs {
             let config = STFTConfig(
-                nFFT: 256,
+                uncheckedNFFT: 256,
                 hopLength: 64,  // 75% overlap
                 windowType: windowType,
                 center: true
@@ -160,7 +160,7 @@ final class RoundTripTests: XCTestCase {
         let nFFT = 512
         let hopLength = nFFT / 2  // 50% overlap
         let config = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             windowType: .hann,
             center: true
@@ -200,7 +200,7 @@ final class RoundTripTests: XCTestCase {
         let nFFT = 512
         let hopLength = nFFT / 4  // 75% overlap
         let config = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             windowType: .hann,
             center: true
@@ -242,7 +242,7 @@ final class RoundTripTests: XCTestCase {
             }
 
             let config = STFTConfig(
-                nFFT: 512,
+                uncheckedNFFT: 512,
                 hopLength: 128,
                 windowType: .hann,
                 center: true
@@ -280,7 +280,7 @@ final class RoundTripTests: XCTestCase {
         let signal: [Float] = [0.1, 0.2, 0.3, 0.4, 0.5]
 
         let config = STFTConfig(
-            nFFT: 16,
+            uncheckedNFFT: 16,
             hopLength: 4,
             center: true
         )
@@ -305,7 +305,7 @@ final class RoundTripTests: XCTestCase {
     func testRoundTripConstantSignal() async {
         let signal = [Float](repeating: 0.5, count: 1024)
 
-        let config = STFTConfig(nFFT: 256, hopLength: 64)
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64)
         let stft = STFT(config: config)
         let istft = ISTFT(config: config)
 
@@ -341,7 +341,7 @@ final class RoundTripTests: XCTestCase {
         let nFFT = 512
         let hopLength = 128
         let config = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             windowType: .hann,
             center: false  // Uncentered
@@ -388,7 +388,7 @@ final class RoundTripTests: XCTestCase {
         }
 
         let config = STFTConfig(
-            nFFT: 2048,
+            uncheckedNFFT: 2048,
             hopLength: 512,
             windowType: .hann,
             center: true

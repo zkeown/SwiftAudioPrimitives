@@ -1,6 +1,48 @@
 import Accelerate
 import Foundation
 import Metal
+import os.log
+
+// MARK: - Logging
+
+/// Logger for SwiftRosa Metal operations.
+///
+/// Uses os.log for efficient system logging. Errors are logged at `.error` level,
+/// GPU fallbacks at `.info` level.
+@available(macOS 11.0, iOS 14.0, *)
+private let metalLogger = Logger(subsystem: "com.swiftrosa", category: "Metal")
+
+/// Log a Metal-related message.
+///
+/// Uses os.log on iOS 14+/macOS 11+, falls back to print for older systems.
+func logMetal(_ message: String, level: MetalLogLevel = .info) {
+    if #available(macOS 11.0, iOS 14.0, *) {
+        switch level {
+        case .error:
+            metalLogger.error("\(message, privacy: .public)")
+        case .warning:
+            metalLogger.warning("\(message, privacy: .public)")
+        case .info:
+            metalLogger.info("\(message, privacy: .public)")
+        case .debug:
+            metalLogger.debug("\(message, privacy: .public)")
+        }
+    } else {
+        #if DEBUG
+        print("[SwiftRosa/Metal] \(level.rawValue): \(message)")
+        #endif
+    }
+}
+
+/// Log levels for Metal operations.
+enum MetalLogLevel: String {
+    case error = "ERROR"
+    case warning = "WARNING"
+    case info = "INFO"
+    case debug = "DEBUG"
+}
+
+// MARK: - Buffer Pool
 
 /// Pool of reusable MTLBuffers to reduce allocation overhead.
 ///
@@ -9,8 +51,15 @@ import Metal
 final class MetalBufferPool: @unchecked Sendable {
     private let device: MTLDevice
     private var pools: [Int: [MTLBuffer]] = [:]  // Size class -> available buffers
-    private let maxBuffersPerClass = 4
     private let lock = NSLock()
+
+    /// Maximum number of buffers to cache per size class.
+    /// Keeping this small limits memory usage while still providing reuse benefit.
+    static let maxBuffersPerSizeClass = 4
+
+    /// Minimum buffer size in bytes (4KB).
+    /// Smaller allocations are rounded up to this for efficiency.
+    static let minimumBufferSize = 4096
 
     init(device: MTLDevice) {
         self.device = device
@@ -18,8 +67,7 @@ final class MetalBufferPool: @unchecked Sendable {
 
     /// Get the size class for a given byte count (next power of 2, min 4KB).
     private func sizeClass(for bytes: Int) -> Int {
-        let minSize = 4096  // 4KB minimum
-        let size = max(bytes, minSize)
+        let size = max(bytes, Self.minimumBufferSize)
         // Round up to next power of 2
         var power = 1
         while power < size {
@@ -32,18 +80,22 @@ final class MetalBufferPool: @unchecked Sendable {
     func acquire(minBytes: Int) -> MTLBuffer? {
         let sizeClass = sizeClass(for: minBytes)
 
+        // First, try to get a cached buffer under lock
         lock.lock()
-        defer { lock.unlock() }
-
-        // Check if we have a cached buffer
         if var available = pools[sizeClass], !available.isEmpty {
             let buffer = available.removeLast()
             pools[sizeClass] = available
+            lock.unlock()
             return buffer
         }
+        lock.unlock()
 
-        // Create new buffer
-        return device.makeBuffer(length: sizeClass, options: .storageModeShared)
+        // Create new buffer outside of lock to avoid blocking other threads
+        let newBuffer = device.makeBuffer(length: sizeClass, options: .storageModeShared)
+        if newBuffer == nil {
+            logMetal("Failed to allocate Metal buffer of size \(sizeClass)", level: .error)
+        }
+        return newBuffer
     }
 
     /// Release a buffer back to the pool.
@@ -54,7 +106,7 @@ final class MetalBufferPool: @unchecked Sendable {
         defer { lock.unlock() }
 
         var available = pools[sizeClass] ?? []
-        if available.count < maxBuffersPerClass {
+        if available.count < Self.maxBuffersPerSizeClass {
             available.append(buffer)
             pools[sizeClass] = available
         }
@@ -873,6 +925,7 @@ public actor MetalEngine {
         let magPtr = magBuffer.contents().assumingMemoryBound(to: Float.self)
         let magData = Array(UnsafeBufferPointer(start: magPtr, count: nFreqs * nFrames))
 
+        // Safe to use unchecked - we created the data with correct size
         return ContiguousMatrix(data: magData, rows: nFreqs, cols: nFrames)
     }
 }
