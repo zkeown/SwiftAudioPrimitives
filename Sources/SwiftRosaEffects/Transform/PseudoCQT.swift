@@ -106,7 +106,7 @@ public struct PseudoCQT: Sendable {
 
         // Create STFT with specified configuration
         self.stft = STFT(config: STFTConfig(
-            nFFT: config.nFFT,
+            uncheckedNFFT: config.nFFT,
             hopLength: config.hopLength,
             winLength: config.nFFT,
             windowType: config.windowType,

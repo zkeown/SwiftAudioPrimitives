@@ -19,7 +19,7 @@ struct Float64PrecisionTests {
         }
 
         // Test STFT -> ISTFT roundtrip with Float32
-        let config32 = STFTConfig(nFFT: 2048, precision: .float32)
+        let config32 = STFTConfig(uncheckedNFFT: 2048, precision: .float32)
         let stft32 = STFT(config: config32)
         let istft32 = ISTFT(config: config32)
 
@@ -27,7 +27,7 @@ struct Float64PrecisionTests {
         let recon32 = await istft32.transform(spec32, length: numSamples)
 
         // Test STFT -> ISTFT roundtrip with Float64
-        let config64 = STFTConfig(nFFT: 2048, precision: .float64)
+        let config64 = STFTConfig(uncheckedNFFT: 2048, precision: .float64)
         let stft64 = STFT(config: config64)
         let istft64 = ISTFT(config: config64)
 
@@ -91,8 +91,8 @@ struct Float64PrecisionTests {
         }
 
         // Float32 and Float64 STFT
-        let config32 = STFTConfig(nFFT: 1024, precision: .float32)
-        let config64 = STFTConfig(nFFT: 1024, precision: .float64)
+        let config32 = STFTConfig(uncheckedNFFT: 1024, precision: .float32)
+        let config64 = STFTConfig(uncheckedNFFT: 1024, precision: .float64)
 
         let stft32 = STFT(config: config32)
         let stft64 = STFT(config: config64)

@@ -26,7 +26,7 @@ final class Tier3BenchmarkTests: XCTestCase {
 
     func testSTFTMagnitudeRegular_1s() async {
         let signal = Self.signal1s
-        let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512))
 
         // Warmup
         _ = await stft.magnitude(signal)
@@ -46,7 +46,7 @@ final class Tier3BenchmarkTests: XCTestCase {
 
     func testSTFTMagnitudeContiguous_1s() async {
         let signal = Self.signal1s
-        let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512))
 
         // Warmup
         _ = await stft.magnitudeContiguous(signal)
@@ -66,7 +66,7 @@ final class Tier3BenchmarkTests: XCTestCase {
 
     func testSTFTMagnitudeRegular_10s() async {
         let signal = Self.signal10s
-        let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512))
 
         // Warmup
         _ = await stft.magnitude(signal)
@@ -86,7 +86,7 @@ final class Tier3BenchmarkTests: XCTestCase {
 
     func testSTFTMagnitudeContiguous_10s() async {
         let signal = Self.signal10s
-        let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512))
 
         // Warmup
         _ = await stft.magnitudeContiguous(signal)
@@ -170,7 +170,7 @@ final class Tier3BenchmarkTests: XCTestCase {
 
     func testCentroidBenchmark_Contiguous() async {
         let signal = Self.signal10s
-        let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512))
         let spectralFeatures = SpectralFeatures()
 
         // Compute magnitude once (this is the optimized path)
@@ -319,7 +319,7 @@ final class Tier3BenchmarkTests: XCTestCase {
         print(String(repeating: "=", count: 60))
 
         let signal = Self.signal10s
-        let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512))
         let spectralFeatures = SpectralFeatures()
 
         // STFT comparison

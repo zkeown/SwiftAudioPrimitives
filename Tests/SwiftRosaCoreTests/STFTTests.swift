@@ -7,7 +7,7 @@ final class STFTTests: XCTestCase {
 
     func testSTFTOutputShape() async {
         let signal = [Float](repeating: 0, count: 1024)
-        let config = STFTConfig(nFFT: 256, hopLength: 64)
+        let config = STFTConfig(uncheckedNFFT: 256, hopLength: 64)
         let stft = STFT(config: config)
 
         let result = await stft.transform(signal)
@@ -34,7 +34,7 @@ final class STFTTests: XCTestCase {
             signal[i] = sin(2 * Float.pi * frequency * Float(i) / sampleRate)
         }
 
-        let config = STFTConfig(nFFT: 1024, hopLength: 256)
+        let config = STFTConfig(uncheckedNFFT: 1024, hopLength: 256)
         let stft = STFT(config: config)
 
         let result = await stft.transform(signal)
@@ -51,7 +51,7 @@ final class STFTTests: XCTestCase {
 
     func testMagnitudeSpectrogram() async {
         let signal = (0..<2048).map { sin(Float($0) * 0.1) }
-        let stft = STFT(config: STFTConfig(nFFT: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 512))
 
         let magnitude = await stft.magnitude(signal)
 
@@ -65,7 +65,7 @@ final class STFTTests: XCTestCase {
 
     func testPowerSpectrogram() async {
         let signal = (0..<2048).map { sin(Float($0) * 0.1) }
-        let stft = STFT(config: STFTConfig(nFFT: 512))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 512))
 
         let power = await stft.power(signal)
 
@@ -83,7 +83,7 @@ final class STFTTests: XCTestCase {
         let signal = [Float](repeating: 0.5, count: 4096)
 
         for nFFT in [256, 512, 1024, 2048] {
-            let config = STFTConfig(nFFT: nFFT)
+            let config = STFTConfig(uncheckedNFFT: nFFT)
             let stft = STFT(config: config)
 
             let result = await stft.transform(signal)
@@ -97,7 +97,7 @@ final class STFTTests: XCTestCase {
         let nFFT = 1024
 
         for hopLength in [128, 256, 512] {
-            let config = STFTConfig(nFFT: nFFT, hopLength: hopLength, center: false)
+            let config = STFTConfig(uncheckedNFFT: nFFT, hopLength: hopLength, center: false)
             let stft = STFT(config: config)
 
             let result = await stft.transform(signal)
@@ -112,8 +112,8 @@ final class STFTTests: XCTestCase {
         let nFFT = 512
         let hopLength = 128
 
-        let configCentered = STFTConfig(nFFT: nFFT, hopLength: hopLength, center: true)
-        let configUncentered = STFTConfig(nFFT: nFFT, hopLength: hopLength, center: false)
+        let configCentered = STFTConfig(uncheckedNFFT: nFFT, hopLength: hopLength, center: true)
+        let configUncentered = STFTConfig(uncheckedNFFT: nFFT, hopLength: hopLength, center: false)
 
         let stftCentered = STFT(config: configCentered)
         let stftUncentered = STFT(config: configUncentered)
@@ -139,7 +139,7 @@ final class STFTTests: XCTestCase {
         }
 
         let nFFT = 2048
-        let config = STFTConfig(nFFT: nFFT, hopLength: 512, windowType: .hann, center: false)
+        let config = STFTConfig(uncheckedNFFT: nFFT, hopLength: 512, windowType: .hann, center: false)
         let stft = STFT(config: config)
 
         let magnitude = await stft.magnitude(signal)
@@ -186,7 +186,7 @@ final class STFTTests: XCTestCase {
         }
 
         let nFFT = 2048
-        let config = STFTConfig(nFFT: nFFT, hopLength: 512, center: false)
+        let config = STFTConfig(uncheckedNFFT: nFFT, hopLength: 512, center: false)
         let stft = STFT(config: config)
 
         let magnitude = await stft.magnitude(signal)
@@ -227,7 +227,7 @@ final class STFTTests: XCTestCase {
         let signal = [Float](repeating: dcLevel, count: 4096)
 
         let nFFT = 1024
-        let config = STFTConfig(nFFT: nFFT, hopLength: 256, windowType: .rectangular, center: false)
+        let config = STFTConfig(uncheckedNFFT: nFFT, hopLength: 256, windowType: .rectangular, center: false)
         let stft = STFT(config: config)
 
         let magnitude = await stft.magnitude(signal)
@@ -271,7 +271,7 @@ final class STFTTests: XCTestCase {
 
         let nFFT = 1024
         let hopLength = 256
-        let config = STFTConfig(nFFT: nFFT, hopLength: hopLength, windowType: .hann, center: false)
+        let config = STFTConfig(uncheckedNFFT: nFFT, hopLength: hopLength, windowType: .hann, center: false)
         let stft = STFT(config: config)
 
         let result1 = await stft.transform(signal1)
@@ -305,7 +305,7 @@ final class STFTTests: XCTestCase {
             signal[i] = amplitude * sin(Float(i) * 0.1)
         }
 
-        let config = STFTConfig(nFFT: 1024, hopLength: 256)
+        let config = STFTConfig(uncheckedNFFT: 1024, hopLength: 256)
         let stft = STFT(config: config)
 
         let power = await stft.power(signal)
@@ -333,7 +333,7 @@ final class STFTTests: XCTestCase {
 
     func testZeroSignalGivesZeroSpectrum() async {
         let signal = [Float](repeating: 0, count: 2048)
-        let config = STFTConfig(nFFT: 512, hopLength: 128)
+        let config = STFTConfig(uncheckedNFFT: 512, hopLength: 128)
         let stft = STFT(config: config)
 
         let magnitude = await stft.magnitude(signal)
@@ -351,7 +351,7 @@ final class STFTTests: XCTestCase {
             signal[i] = Float.random(in: -1...1)
         }
 
-        let config = STFTConfig(nFFT: 512, hopLength: 128)
+        let config = STFTConfig(uncheckedNFFT: 512, hopLength: 128)
         let stft = STFT(config: config)
 
         let result = await stft.transform(signal)
@@ -385,7 +385,7 @@ final class STFTTests: XCTestCase {
 
         for tc in testCases {
             let signal = [Float](repeating: 0.5, count: tc.signalLen)
-            let config = STFTConfig(nFFT: tc.nFFT, hopLength: tc.hopLength, center: false)
+            let config = STFTConfig(uncheckedNFFT: tc.nFFT, hopLength: tc.hopLength, center: false)
             let stft = STFT(config: config)
 
             let result = await stft.transform(signal)

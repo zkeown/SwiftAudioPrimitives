@@ -18,9 +18,9 @@ final class StreamingTests: XCTestCase {
 
     // MARK: - StreamingSTFT Tests
 
-    func testStreamingSTFTBasic() async {
+    func testStreamingSTFTBasic() async throws {
         let config = STFTConfig(
-            nFFT: 256,
+            uncheckedNFFT: 256,
             hopLength: 64,
             windowType: .hann,
             center: false
@@ -35,7 +35,7 @@ final class StreamingTests: XCTestCase {
         }
 
         // Push samples
-        await streaming.push(signal)
+        try await streaming.push(signal)
 
         // Should have frames available
         let frames = await streaming.popFrames()
@@ -48,9 +48,9 @@ final class StreamingTests: XCTestCase {
         }
     }
 
-    func testStreamingSTFTIncremental() async {
+    func testStreamingSTFTIncremental() async throws {
         let config = STFTConfig(
-            nFFT: 256,
+            uncheckedNFFT: 256,
             hopLength: 64,
             windowType: .hann,
             center: false
@@ -68,7 +68,7 @@ final class StreamingTests: XCTestCase {
                 chunk[i] = Float.random(in: -1...1)
             }
 
-            await streaming.push(chunk)
+            try await streaming.push(chunk)
             let frames = await streaming.popFrames()
             totalFrames += frames.count
         }
@@ -80,11 +80,11 @@ final class StreamingTests: XCTestCase {
         XCTAssertGreaterThan(totalFrames, 0, "Should produce frames from incremental input")
     }
 
-    func testStreamingSTFTEquivalenceToBatch() async {
+    func testStreamingSTFTEquivalenceToBatch() async throws {
         // Streaming STFT should produce IDENTICAL results to batch STFT (without centering)
         // Note: streaming flush() may produce one extra zero-padded frame
         let config = STFTConfig(
-            nFFT: 256,
+            uncheckedNFFT: 256,
             hopLength: 64,
             windowType: .hann,
             center: false
@@ -103,7 +103,7 @@ final class StreamingTests: XCTestCase {
 
         // Streaming STFT - push all at once (should be identical to batch)
         let streaming = StreamingSTFT(config: config)
-        await streaming.push(signal)
+        try await streaming.push(signal)
         let streamingFrames = await streaming.flush()
 
         // Frame count should match exactly or differ by at most 1 (due to flush padding)
@@ -151,10 +151,10 @@ final class StreamingTests: XCTestCase {
             "Magnitude max error: \(maxMagError)")
     }
 
-    func testStreamingSTFTIncrementalEquivalence() async {
+    func testStreamingSTFTIncrementalEquivalence() async throws {
         // Verify that pushing samples incrementally produces same result as batch
         let config = STFTConfig(
-            nFFT: 256,
+            uncheckedNFFT: 256,
             hopLength: 64,
             windowType: .hann,
             center: false
@@ -168,7 +168,7 @@ final class StreamingTests: XCTestCase {
 
         // Streaming STFT - push all at once
         let streamingAll = StreamingSTFT(config: config)
-        await streamingAll.push(signal)
+        try await streamingAll.push(signal)
         let framesAll = await streamingAll.flush()
 
         // Streaming STFT - push in chunks
@@ -176,7 +176,7 @@ final class StreamingTests: XCTestCase {
         let chunkSize = 128
         for start in stride(from: 0, to: signal.count, by: chunkSize) {
             let end = min(start + chunkSize, signal.count)
-            await streamingChunks.push(Array(signal[start..<end]))
+            try await streamingChunks.push(Array(signal[start..<end]))
         }
         var framesChunks: [ComplexMatrix] = []
         framesChunks.append(contentsOf: await streamingChunks.flush())
@@ -200,12 +200,12 @@ final class StreamingTests: XCTestCase {
             "Incremental vs all-at-once max error: \(maxError)")
     }
 
-    func testStreamingSTFTReset() async {
-        let streaming = StreamingSTFT(config: STFTConfig(nFFT: 256, hopLength: 64, center: false))
+    func testStreamingSTFTReset() async throws {
+        let streaming = StreamingSTFT(config: STFTConfig(uncheckedNFFT: 256, hopLength: 64, center: false))
 
         // Push some samples
         let signal = [Float](repeating: 0.5, count: 512)
-        await streaming.push(signal)
+        try await streaming.push(signal)
 
         // Reset
         await streaming.reset()
@@ -219,9 +219,9 @@ final class StreamingTests: XCTestCase {
 
     // MARK: - StreamingISTFT Tests
 
-    func testStreamingISTFTBasic() async {
+    func testStreamingISTFTBasic() async throws {
         let config = STFTConfig(
-            nFFT: 256,
+            uncheckedNFFT: 256,
             hopLength: 64,
             windowType: .hann,
             center: false
@@ -238,7 +238,7 @@ final class StreamingTests: XCTestCase {
         }
 
         // Push frames
-        let output = await streamingISTFT.push(frames)
+        let output = try await streamingISTFT.push(frames)
 
         // Should produce some output (may buffer some)
         // Note: ISTFT needs overlap to output, so initial frames may be buffered
@@ -251,7 +251,7 @@ final class StreamingTests: XCTestCase {
     }
 
     func testStreamingISTFTLatency() async {
-        let config = STFTConfig(nFFT: 2048, hopLength: 512)
+        let config = STFTConfig(uncheckedNFFT: 2048, hopLength: 512)
         let streaming = StreamingISTFT(config: config)
 
         let latency = await streaming.latencySamples
@@ -264,10 +264,10 @@ final class StreamingTests: XCTestCase {
 
     // MARK: - Round-Trip Streaming Tests
 
-    func testStreamingRoundTrip() async {
+    func testStreamingRoundTrip() async throws {
         // Use COLA-compliant config (Hann with 75% overlap) for best reconstruction
         let config = STFTConfig(
-            nFFT: 512,
+            uncheckedNFFT: 512,
             hopLength: 128,  // 75% overlap
             windowType: .hann,
             center: false
@@ -281,12 +281,12 @@ final class StreamingTests: XCTestCase {
 
         // Forward: Streaming STFT
         let streamingSTFT = StreamingSTFT(config: config)
-        await streamingSTFT.push(signal)
+        try await streamingSTFT.push(signal)
         let frames = await streamingSTFT.flush()
 
         // Inverse: Streaming ISTFT
         let streamingISTFT = StreamingISTFT(config: config)
-        var reconstructed = await streamingISTFT.push(frames)
+        var reconstructed = try await streamingISTFT.push(frames)
         reconstructed.append(contentsOf: await streamingISTFT.flush())
 
         // Compare (accounting for edge effects in non-centered mode)
@@ -317,7 +317,7 @@ final class StreamingTests: XCTestCase {
             "Streaming round-trip RMSE: \(rmse)")
     }
 
-    func testStreamingRoundTripCOLA() async {
+    func testStreamingRoundTripCOLA() async throws {
         // Test with different COLA configurations
         let configs: [(Int, Int, String)] = [
             (512, 128, "Hann 75% overlap"),  // nFFT/4
@@ -326,7 +326,7 @@ final class StreamingTests: XCTestCase {
 
         for (nFFT, hopLength, description) in configs {
             let config = STFTConfig(
-                nFFT: nFFT,
+                uncheckedNFFT: nFFT,
                 hopLength: hopLength,
                 windowType: .hann,
                 center: false
@@ -340,11 +340,11 @@ final class StreamingTests: XCTestCase {
 
             // Round trip with streaming
             let stft = StreamingSTFT(config: config)
-            await stft.push(signal)
+            try await stft.push(signal)
             let frames = await stft.flush()
 
             let istft = StreamingISTFT(config: config)
-            var reconstructed = await istft.push(frames)
+            var reconstructed = try await istft.push(frames)
             reconstructed.append(contentsOf: await istft.flush())
 
             // Calculate error in valid region
@@ -371,9 +371,9 @@ final class StreamingTests: XCTestCase {
 
     // MARK: - StreamingProcessor Tests
 
-    func testStreamingProcessorPassthrough() async {
+    func testStreamingProcessorPassthrough() async throws {
         let config = STFTConfig(
-            nFFT: 512,
+            uncheckedNFFT: 512,
             hopLength: 128,
             windowType: .hann,
             center: false
@@ -388,28 +388,28 @@ final class StreamingTests: XCTestCase {
         }
 
         // Process with identity transform
-        let output = await processor.process(signal) { frames in
+        let output = try await processor.process(signal) { frames in
             frames  // Pass through unchanged
         }
 
-        let flushed = await processor.flush()
+        let flushed = try await processor.flush()
         let totalOutput = output + flushed
 
         XCTAssertGreaterThan(totalOutput.count, 0, "Should produce output")
     }
 
-    func testStreamingProcessorReset() async {
-        let processor = StreamingProcessor(config: STFTConfig(nFFT: 256, hopLength: 64))
+    func testStreamingProcessorReset() async throws {
+        let processor = StreamingProcessor(config: STFTConfig(uncheckedNFFT: 256, hopLength: 64))
 
         let signal = [Float](repeating: 0.5, count: 512)
-        _ = await processor.process(signal) { $0 }
+        _ = try await processor.process(signal) { $0 }
 
         // Reset and process again
         await processor.reset()
 
         let signal2 = [Float](repeating: 0.3, count: 512)
-        let output = await processor.process(signal2) { $0 }
-        let flushed = await processor.flush()
+        let output = try await processor.process(signal2) { $0 }
+        let flushed = try await processor.flush()
 
         XCTAssertGreaterThan(output.count + flushed.count, 0)
     }

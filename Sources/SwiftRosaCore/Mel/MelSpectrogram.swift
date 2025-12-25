@@ -70,9 +70,9 @@ public struct MelSpectrogram: Sendable {
         self.useGPU = useGPU
 
         let stftConfig = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
-            winLength: winLength,
+            winLength: winLength ?? nFFT,
             windowType: windowType,
             center: center,
             padMode: padMode
@@ -107,7 +107,12 @@ public struct MelSpectrogram: Sendable {
 
         // Initialize Metal engine if GPU is preferred and available
         if useGPU && MetalEngine.isAvailable {
-            self.metalEngine = try? MetalEngine()
+            do {
+                self.metalEngine = try MetalEngine()
+            } catch {
+                logMetal("MelSpectrogram: Failed to initialize Metal engine: \(error). Falling back to CPU.", level: .warning)
+                self.metalEngine = nil
+            }
         } else {
             self.metalEngine = nil
         }

@@ -2,6 +2,12 @@ import SwiftRosaCore
 import Accelerate
 import Foundation
 
+/// Errors that can occur during streaming audio processing.
+public enum StreamingError: Error, Sendable {
+    /// Buffer overflow: requested size exceeds maximum allowed.
+    case bufferOverflow(requested: Int, max: Int)
+}
+
 /// Reusable workspace for streaming FFT computation to minimize allocations.
 final class StreamingFFTWorkspace: @unchecked Sendable {
     /// Split complex buffers for FFT input.
@@ -50,8 +56,8 @@ final class StreamingFFTWorkspace: @unchecked Sendable {
 /// let streaming = StreamingSTFT(config: STFTConfig(nFFT: 1024, hopLength: 256))
 ///
 /// // Audio callback (e.g., from AVAudioEngine)
-/// func audioCallback(buffer: [Float]) async {
-///     await streaming.push(buffer)
+/// func audioCallback(buffer: [Float]) async throws {
+///     try await streaming.push(buffer)
 ///
 ///     // Process available frames
 ///     let frames = await streaming.popFrames()
@@ -64,6 +70,12 @@ final class StreamingFFTWorkspace: @unchecked Sendable {
 /// let remaining = await streaming.flush()
 /// ```
 public actor StreamingSTFT {
+    /// Default maximum buffer size (10 MB of Float samples = ~2.5M samples).
+    public static let defaultMaxBufferSize = 10 * 1024 * 1024 / MemoryLayout<Float>.size
+
+    /// Maximum allowed buffer size in samples.
+    public let maxBufferSize: Int
+
     /// Ring buffer for incoming samples.
     private var ringBuffer: [Float]
 
@@ -95,9 +107,13 @@ public actor StreamingSTFT {
 
     /// Create a streaming STFT processor.
     ///
-    /// - Parameter config: STFT configuration.
-    public init(config: STFTConfig = STFTConfig()) {
+    /// - Parameters:
+    ///   - config: STFT configuration.
+    ///   - maxBufferSize: Maximum buffer size in samples. Defaults to ~2.5M samples (10 MB).
+    ///                    Set to `Int.max` to disable the limit (not recommended).
+    public init(config: STFTConfig = .default, maxBufferSize: Int = StreamingSTFT.defaultMaxBufferSize) {
         self.config = config
+        self.maxBufferSize = maxBufferSize
         self.window = Windows.generate(config.windowType, length: config.winLength, periodic: true)
 
         // Ring buffer sized for at least 2 FFT windows worth of data
@@ -117,13 +133,17 @@ public actor StreamingSTFT {
     /// Push new audio samples into the buffer.
     ///
     /// - Parameter samples: Audio samples to add.
-    /// - Note: If the buffer would overflow, it automatically expands to accommodate all samples.
-    public func push(_ samples: [Float]) {
+    /// - Throws: `StreamingError.bufferOverflow` if the buffer would exceed `maxBufferSize`.
+    /// - Note: If the buffer would grow beyond its current size (but within limits), it automatically expands.
+    public func push(_ samples: [Float]) throws {
         // Check if we need to expand the buffer
         let neededCapacity = samplesInBuffer + samples.count
         if neededCapacity > ringBuffer.count {
-            // Expand buffer - at least double or enough for the new samples
+            // Check against max buffer size limit
             let newSize = max(ringBuffer.count * 2, neededCapacity + config.nFFT)
+            if newSize > maxBufferSize {
+                throw StreamingError.bufferOverflow(requested: newSize, max: maxBufferSize)
+            }
             var newBuffer = [Float](repeating: 0, count: newSize)
 
             // Copy existing samples to new buffer using block copies
@@ -470,8 +490,9 @@ extension StreamingSTFT {
     /// Create a streaming STFT with Banquet-compatible settings.
     public static var forBanquet: StreamingSTFT {
         StreamingSTFT(config: STFTConfig(
-            nFFT: 2048,
+            uncheckedNFFT: 2048,
             hopLength: 512,
+            winLength: 2048,
             windowType: .hann,
             center: false  // Streaming mode doesn't use centering
         ))
@@ -483,9 +504,10 @@ extension StreamingSTFT {
     ///
     /// - Parameter signal: Complete audio signal.
     /// - Returns: All STFT frames.
-    public func processComplete(_ signal: [Float]) -> [ComplexMatrix] {
+    /// - Throws: `StreamingError.bufferOverflow` if the signal exceeds `maxBufferSize`.
+    public func processComplete(_ signal: [Float]) throws -> [ComplexMatrix] {
         reset()
-        push(signal)
+        try push(signal)
         return flush()
     }
 }

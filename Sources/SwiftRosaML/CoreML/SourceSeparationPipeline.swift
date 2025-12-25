@@ -76,7 +76,7 @@ public struct SourceSeparationConfig: Sendable {
     /// STFT configuration derived from this config.
     public var stftConfig: STFTConfig {
         STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             winLength: nFFT,
             windowType: windowType,

@@ -79,7 +79,7 @@ final class SpectralBandwidthValidationTest: XCTestCase {
         // Verify that the signal generation with Double precision produces low noise
         let signal = TestSignalGenerator.sine(frequency: 440, sampleRate: 22050, duration: 1.0)
 
-        let stft = STFT(config: STFTConfig(nFFT: 2048, hopLength: 512, center: true, padMode: .constant(0)))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512, center: true, padMode: .constant(0)))
         let mag = await stft.magnitude(signal)
 
         let frameIdx = 5

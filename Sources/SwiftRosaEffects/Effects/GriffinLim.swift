@@ -133,7 +133,7 @@ public struct GriffinLim: Sendable {
     ///               Higher values speed up convergence. Set to 0 for classic Griffin-Lim.
     ///   - randomPhaseInit: Use random initial phase (default: true).
     public init(
-        config: STFTConfig = STFTConfig(),
+        config: STFTConfig = .default,
         nIter: Int = 32,
         momentum: Float = 0.99,
         randomPhaseInit: Bool = true
@@ -517,7 +517,7 @@ extension GriffinLim {
     /// Create a default Griffin-Lim configured for common audio ML use cases.
     public static var defaultForML: GriffinLim {
         GriffinLim(
-            config: STFTConfig(nFFT: 1024, hopLength: 256, windowType: .hann),
+            config: STFTConfig(uncheckedNFFT: 1024, hopLength: 256, winLength: 1024, windowType: .hann),
             nIter: 60,
             momentum: 0.99,
             randomPhaseInit: true
@@ -527,7 +527,7 @@ extension GriffinLim {
     /// Create a Griffin-Lim configured for Banquet model (if magnitude output).
     public static var forBanquet: GriffinLim {
         GriffinLim(
-            config: STFTConfig(nFFT: 2048, hopLength: 512, windowType: .hann),
+            config: STFTConfig(uncheckedNFFT: 2048, hopLength: 512, winLength: 2048, windowType: .hann),
             nIter: 32,
             momentum: 0.99,
             randomPhaseInit: true

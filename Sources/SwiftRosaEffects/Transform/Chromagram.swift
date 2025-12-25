@@ -151,7 +151,7 @@ public struct Chromagram: Sendable {
             let nFreqBins = config.nFFT / 2 + 1
             self.nFreqs = nFreqBins
             self.stft = STFT(config: STFTConfig(
-                nFFT: config.nFFT,
+                uncheckedNFFT: config.nFFT,
                 hopLength: config.hopLength,
                 winLength: config.nFFT,
                 windowType: config.windowType,

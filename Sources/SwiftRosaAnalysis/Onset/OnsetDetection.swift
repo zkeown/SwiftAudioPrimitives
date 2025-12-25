@@ -132,7 +132,7 @@ public struct OnsetDetector: Sendable {
     public init(config: OnsetConfig = OnsetConfig()) {
         self.config = config
         self.stft = STFT(config: STFTConfig(
-            nFFT: config.nFFT,
+            uncheckedNFFT: config.nFFT,
             hopLength: config.hopLength,
             winLength: config.nFFT,
             windowType: .hann,

@@ -1,6 +1,18 @@
 import Accelerate
 import Foundation
 
+// MARK: - Error Types
+
+/// Errors that can occur during STFT configuration or computation.
+public enum STFTError: Error, Sendable {
+    /// FFT size must be a positive power of 2.
+    case invalidFFTSize(Int)
+    /// Hop length must be positive and not exceed FFT size.
+    case invalidHopLength(hopLength: Int, nFFT: Int)
+    /// Window length must be positive and not exceed FFT size.
+    case invalidWindowLength(winLength: Int, nFFT: Int)
+}
+
 /// Padding mode for signal centering.
 public enum PadMode: Sendable {
     /// Reflect signal at boundaries.
@@ -44,18 +56,67 @@ public struct STFTConfig: Sendable {
     /// Note: float64 disables GPU acceleration.
     public let precision: FloatPrecision
 
-    /// Create STFT configuration.
+    /// Create STFT configuration with validation.
     ///
     /// - Parameters:
-    ///   - nFFT: FFT size (default: 2048).
-    ///   - hopLength: Hop between frames (default: nFFT/4).
-    ///   - winLength: Window length (default: nFFT).
+    ///   - nFFT: FFT size (default: 2048). Must be a positive power of 2.
+    ///   - hopLength: Hop between frames (default: nFFT/4). Must be positive and ≤ nFFT.
+    ///   - winLength: Window length (default: nFFT). Must be positive and ≤ nFFT.
     ///   - windowType: Window function (default: hann).
     ///   - center: Pad signal for centered frames (default: true).
     ///   - padMode: Padding mode (default: constant(0), matching librosa).
     ///   - precision: FFT precision (default: float32).
+    /// - Throws: `STFTError` if parameters are invalid.
     public init(
         nFFT: Int = 2048,
+        hopLength: Int? = nil,
+        winLength: Int? = nil,
+        windowType: WindowType = .hann,
+        center: Bool = true,
+        padMode: PadMode = .constant(0),
+        precision: FloatPrecision = .float32
+    ) throws {
+        // Validate nFFT is positive power of 2
+        guard nFFT > 0 && (nFFT & (nFFT - 1)) == 0 else {
+            throw STFTError.invalidFFTSize(nFFT)
+        }
+
+        let resolvedHopLength = hopLength ?? (nFFT / 4)
+        guard resolvedHopLength > 0 && resolvedHopLength <= nFFT else {
+            throw STFTError.invalidHopLength(hopLength: resolvedHopLength, nFFT: nFFT)
+        }
+
+        let resolvedWinLength = winLength ?? nFFT
+        guard resolvedWinLength > 0 && resolvedWinLength <= nFFT else {
+            throw STFTError.invalidWindowLength(winLength: resolvedWinLength, nFFT: nFFT)
+        }
+
+        self.nFFT = nFFT
+        self.hopLength = resolvedHopLength
+        self.winLength = resolvedWinLength
+        self.windowType = windowType
+        self.center = center
+        self.padMode = padMode
+        self.precision = precision
+    }
+
+    /// Create STFT configuration without validation (for internal/trusted use).
+    ///
+    /// Use this when you've already validated parameters or are using known-good defaults.
+    ///
+    /// - Parameters:
+    ///   - nFFT: FFT size (must be a positive power of 2).
+    ///   - hopLength: Hop between frames (default: nFFT/4).
+    ///   - winLength: Window length (default: nFFT).
+    ///   - windowType: Window function (default: hann).
+    ///   - center: Pad signal for centered frames (default: true).
+    ///   - padMode: Padding mode (default: constant(0)).
+    ///   - precision: FFT precision (default: float32).
+    ///
+    /// - Warning: Invalid parameters will cause undefined behavior during STFT computation.
+    @inline(__always)
+    public init(
+        uncheckedNFFT nFFT: Int,
         hopLength: Int? = nil,
         winLength: Int? = nil,
         windowType: WindowType = .hann,
@@ -70,6 +131,17 @@ public struct STFTConfig: Sendable {
         self.center = center
         self.padMode = padMode
         self.precision = precision
+    }
+
+    /// Create default STFT configuration (nFFT=2048, hopLength=512, winLength=2048).
+    ///
+    /// This is guaranteed to be valid and doesn't throw.
+    public static var `default`: STFTConfig {
+        STFTConfig(
+            uncheckedNFFT: 2048,
+            hopLength: 512,
+            winLength: 2048
+        )
     }
 
     /// Number of frequency bins in output (nFFT/2 + 1 for real input).
@@ -158,7 +230,7 @@ public struct STFT: Sendable {
     /// - Parameters:
     ///   - config: STFT configuration.
     ///   - useGPU: Prefer GPU acceleration when available (default: true).
-    public init(config: STFTConfig = STFTConfig(), useGPU: Bool = true) {
+    public init(config: STFTConfig = .default, useGPU: Bool = true) {
         self.config = config
         self.useGPU = useGPU
         self.window = Windows.generate(config.windowType, length: config.winLength, periodic: true)
@@ -179,7 +251,12 @@ public struct STFT: Sendable {
         // Initialize Metal engine if GPU is preferred, available, and using float32
         // Note: Metal only supports Float32, so GPU is disabled for Float64 precision
         if useGPU && MetalEngine.isAvailable && config.precision == .float32 {
-            self.metalEngine = try? MetalEngine()
+            do {
+                self.metalEngine = try MetalEngine()
+            } catch {
+                logMetal("Failed to initialize Metal engine: \(error). Falling back to CPU.", level: .warning)
+                self.metalEngine = nil
+            }
         } else {
             self.metalEngine = nil
         }
@@ -322,6 +399,7 @@ public struct STFT: Sendable {
             }
         }
 
+        // Safe to use unchecked - we construct matching arrays
         return ComplexMatrix(real: realResult, imag: imagResult)
     }
 
@@ -462,6 +540,7 @@ public struct STFT: Sendable {
             imagResult.append(transposedImag[start..<end].map { Float($0) })
         }
 
+        // Safe to use unchecked - we construct matching arrays
         return ComplexMatrix(real: realResult, imag: imagResult)
     }
 
@@ -578,6 +657,7 @@ public struct STFT: Sendable {
             }
         }
 
+        // Safe to use unchecked - we construct matching arrays
         return ComplexMatrix(real: realResult, imag: imagResult)
     }
 
@@ -641,7 +721,7 @@ public struct STFT: Sendable {
                 }
                 return result
             } catch {
-                // Fall through to CPU on GPU error
+                logMetal("GPU magnitude computation failed: \(error). Falling back to CPU.", level: .info)
             }
         }
 
@@ -964,6 +1044,7 @@ public struct STFT: Sendable {
             }
         }
 
+        // Safe to use unchecked - we created the data with correct sizes
         return ContiguousComplexMatrix(real: realData, imag: imagData, rows: nFreqs, cols: nFrames)
     }
 
@@ -1022,6 +1103,7 @@ public struct STFT: Sendable {
             }
         }
 
+        // Safe to use unchecked - we created the data with correct size
         return ContiguousMatrix(data: magData, rows: nFreqs, cols: nFrames)
     }
 
@@ -1077,6 +1159,7 @@ public struct STFT: Sendable {
             }
         }
 
+        // Safe to use unchecked - we created the data with correct size
         return ContiguousMatrix(data: powerData, rows: nFreqs, cols: nFrames)
     }
 }

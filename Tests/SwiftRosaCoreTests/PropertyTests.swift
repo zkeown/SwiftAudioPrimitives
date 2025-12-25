@@ -26,7 +26,7 @@ final class PropertyTests: XCTestCase {
             ("impulse", generateImpulse(length: 11025, position: 5512)),
         ]
 
-        let stftConfig = STFTConfig(nFFT: 1024, hopLength: 256, windowType: .hann)
+        let stftConfig = STFTConfig(uncheckedNFFT: 1024, hopLength: 256, windowType: .hann)
         let stft = STFT(config: stftConfig)
         let istft = ISTFT(config: stftConfig)
 
@@ -67,7 +67,7 @@ final class PropertyTests: XCTestCase {
         ]
 
         var ratios: [Float] = []
-        let stft = STFT(config: STFTConfig(nFFT: 1024, hopLength: 256, center: false))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 1024, hopLength: 256, center: false))
 
         for (_, signal) in testSignals {
             // Time domain energy
@@ -122,7 +122,7 @@ final class PropertyTests: XCTestCase {
             shiftedSignal[i] = signal[i - shiftSamples]
         }
 
-        let stft = STFT(config: STFTConfig(nFFT: 512, hopLength: 128, center: false))
+        let stft = STFT(config: STFTConfig(uncheckedNFFT: 512, hopLength: 128, center: false))
 
         let spec1 = await stft.transform(signal)
         let spec2 = await stft.transform(shiftedSignal)

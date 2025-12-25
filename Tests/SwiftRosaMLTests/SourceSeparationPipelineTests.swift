@@ -280,7 +280,7 @@ final class SourceSeparationPipelineTests: XCTestCase {
 
         // The pipeline should create STFT configs matching separation config
         let stftConfig = STFTConfig(
-            nFFT: sepConfig.nFFT,
+            uncheckedNFFT: sepConfig.nFFT,
             hopLength: sepConfig.hopLength,
             windowType: sepConfig.windowType,
             center: true
@@ -305,7 +305,7 @@ final class SourceSeparationPipelineTests: XCTestCase {
         }
 
         let stftConfig = STFTConfig(
-            nFFT: config.nFFT,
+            uncheckedNFFT: config.nFFT,
             hopLength: config.hopLength,
             windowType: config.windowType,
             center: true
@@ -346,7 +346,7 @@ final class SourceSeparationPipelineTests: XCTestCase {
 
         // STFT
         let stftConfig = STFTConfig(
-            nFFT: config.nFFT,
+            uncheckedNFFT: config.nFFT,
             hopLength: config.hopLength,
             windowType: config.windowType,
             center: true
@@ -410,7 +410,7 @@ final class SourceSeparationPipelineTests: XCTestCase {
 
         // STFT
         let stftConfig = STFTConfig(
-            nFFT: config.nFFT,
+            uncheckedNFFT: config.nFFT,
             hopLength: config.hopLength,
             windowType: config.windowType,
             center: true

@@ -210,7 +210,7 @@ final class ComprehensiveValidationTests: XCTestCase {
             let signal = try loadSignal(signalName)
 
             let config = STFTConfig(
-                nFFT: nFFT,
+                uncheckedNFFT: nFFT,
                 hopLength: hopLength,
                 windowType: .hann,
                 center: true,
@@ -265,7 +265,7 @@ final class ComprehensiveValidationTests: XCTestCase {
             let signal = try loadSignal(signalName)
 
             let config = STFTConfig(
-                nFFT: nFFT,
+                uncheckedNFFT: nFFT,
                 hopLength: hopLength,
                 windowType: .hann,
                 center: true,
@@ -884,7 +884,7 @@ final class ComprehensiveValidationTests: XCTestCase {
         let signal = try loadSignal("short_sine")
 
         let stftConfig = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             windowType: .hann,
             center: true,

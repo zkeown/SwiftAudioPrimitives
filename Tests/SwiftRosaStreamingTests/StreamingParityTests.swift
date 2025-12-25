@@ -91,7 +91,7 @@ final class StreamingParityTests: XCTestCase {
 
         // Batch processing
         let batchConfig = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             windowType: .hann,
             center: true,
@@ -103,7 +103,7 @@ final class StreamingParityTests: XCTestCase {
 
         // Streaming processing
         let streamingConfig = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             windowType: .hann,
             center: false,
@@ -118,7 +118,7 @@ final class StreamingParityTests: XCTestCase {
             let end = min(start + chunkSize, signal.count)
             let chunk = Array(signal[start..<end])
 
-            await streamingSTFT.push(chunk)
+            try await streamingSTFT.push(chunk)
             let frames = await streamingSTFT.popFrames()
             // Extract magnitude from each ComplexMatrix frame
             for frame in frames {
@@ -179,7 +179,7 @@ final class StreamingParityTests: XCTestCase {
 
         // Batch processing
         let batchConfig = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             windowType: .hann,
             center: true,
@@ -190,7 +190,7 @@ final class StreamingParityTests: XCTestCase {
 
         // Streaming processing
         let streamingConfig = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             windowType: .hann,
             center: false,
@@ -204,7 +204,7 @@ final class StreamingParityTests: XCTestCase {
             let end = min(start + chunkSize, signal.count)
             let chunk = Array(signal[start..<end])
 
-            await streamingSTFT.push(chunk)
+            try await streamingSTFT.push(chunk)
             let frames = await streamingSTFT.popFrames()
             streamingFrameCount += frames.count
         }
@@ -539,7 +539,7 @@ final class StreamingParityTests: XCTestCase {
         let smallChunkSize = 128  // Much smaller than nFFT
 
         let streamingConfig = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             windowType: .hann,
             center: false,
@@ -553,7 +553,7 @@ final class StreamingParityTests: XCTestCase {
             let end = min(start + smallChunkSize, signal.count)
             let chunk = Array(signal[start..<end])
 
-            await streamingSTFT.push(chunk)
+            try await streamingSTFT.push(chunk)
             let frames = await streamingSTFT.popFrames()
             frameCount += frames.count
         }
@@ -574,7 +574,7 @@ final class StreamingParityTests: XCTestCase {
         let signal = generateSine(frequency: 440, duration: 0.5)
 
         let streamingConfig = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             windowType: .hann,
             center: false,
@@ -586,7 +586,7 @@ final class StreamingParityTests: XCTestCase {
 
         // Push one sample at a time (first 5000 samples to limit test time)
         for i in 0..<min(5000, signal.count) {
-            await streamingSTFT.push([signal[i]])
+            try await streamingSTFT.push([signal[i]])
             let frames = await streamingSTFT.popFrames()
             frameCount += frames.count
         }
@@ -602,7 +602,7 @@ final class StreamingParityTests: XCTestCase {
         let signal2 = generateSine(frequency: 880, duration: 0.5)
 
         let streamingConfig = STFTConfig(
-            nFFT: nFFT,
+            uncheckedNFFT: nFFT,
             hopLength: hopLength,
             windowType: .hann,
             center: false,
@@ -611,14 +611,14 @@ final class StreamingParityTests: XCTestCase {
         let streamingSTFT = StreamingSTFT(config: streamingConfig)
 
         // Process first signal
-        await streamingSTFT.push(signal1)
+        try await streamingSTFT.push(signal1)
         _ = await streamingSTFT.popFrames()
 
         // Reset
         await streamingSTFT.reset()
 
         // Process second signal
-        await streamingSTFT.push(signal2)
+        try await streamingSTFT.push(signal2)
         let frames = await streamingSTFT.popFrames()
 
         // After reset, should process second signal cleanly

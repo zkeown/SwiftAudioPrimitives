@@ -1,6 +1,24 @@
 import Accelerate
 import Foundation
 
+// MARK: - Error Types
+
+/// Errors that can occur during complex matrix operations.
+public enum ComplexMatrixError: Error, Sendable {
+    /// Real and imaginary arrays have different row counts.
+    case rowCountMismatch(real: Int, imag: Int)
+    /// Real and imaginary arrays have different column counts.
+    case columnCountMismatch(real: Int, imag: Int)
+    /// Array size doesn't match expected dimensions.
+    case sizeMismatch(expected: Int, actual: Int)
+    /// Magnitude and phase arrays have different sizes.
+    case polarSizeMismatch(magnitude: Int, phase: Int)
+    /// Vector length doesn't match matrix columns for multiplication.
+    case vectorSizeMismatch(expected: Int, actual: Int)
+    /// Data array size doesn't match rows × cols.
+    case dataSizeMismatch(expected: Int, actual: Int)
+}
+
 /// A matrix of complex numbers stored in split format for Accelerate compatibility.
 public struct ComplexMatrix: Sendable {
     /// Real components, shape: (rows, cols)
@@ -19,15 +37,28 @@ public struct ComplexMatrix: Sendable {
     /// - Parameters:
     ///   - real: Real component matrix.
     ///   - imag: Imaginary component matrix.
-    /// - Precondition: real and imag must have the same shape.
+    /// - Note: For dimension validation, use `validated(real:imag:)` which throws on mismatch.
     public init(real: [[Float]], imag: [[Float]]) {
-        precondition(real.count == imag.count, "Real and imag must have same number of rows")
-        precondition(
-            real.isEmpty || imag.isEmpty || real[0].count == imag[0].count,
-            "Real and imag must have same number of columns"
-        )
         self.real = real
         self.imag = imag
+    }
+
+    /// Create a complex matrix with dimension validation.
+    ///
+    /// - Parameters:
+    ///   - real: Real component matrix.
+    ///   - imag: Imaginary component matrix.
+    /// - Throws: `ComplexMatrixError` if real and imag have different shapes.
+    public static func validated(real: [[Float]], imag: [[Float]]) throws -> ComplexMatrix {
+        guard real.count == imag.count else {
+            throw ComplexMatrixError.rowCountMismatch(real: real.count, imag: imag.count)
+        }
+        if !real.isEmpty && !imag.isEmpty {
+            guard real[0].count == imag[0].count else {
+                throw ComplexMatrixError.columnCountMismatch(real: real[0].count, imag: imag[0].count)
+            }
+        }
+        return ComplexMatrix(real: real, imag: imag)
     }
 
     /// Create a zero-filled complex matrix.
@@ -97,8 +128,6 @@ public struct ComplexMatrix: Sendable {
     ///   - phase: Phase angles in radians.
     /// - Returns: Complex matrix with real = mag * cos(phase), imag = mag * sin(phase).
     public static func fromPolar(magnitude: [[Float]], phase: [[Float]]) -> ComplexMatrix {
-        precondition(magnitude.count == phase.count, "Magnitude and phase must have same number of rows")
-
         let rows = magnitude.count
         guard rows > 0 else { return ComplexMatrix(rows: 0, cols: 0) }
 
@@ -156,10 +185,9 @@ extension ComplexMatrix {
     }
 
     /// Create from flat arrays.
+    ///
+    /// - Note: For validation, use `fromFlatValidated` which throws on size mismatch.
     public static func fromFlat(real: [Float], imag: [Float], rows: Int, cols: Int) -> ComplexMatrix {
-        precondition(real.count == rows * cols, "Real array size mismatch")
-        precondition(imag.count == rows * cols, "Imag array size mismatch")
-
         var realMatrix = [[Float]]()
         var imagMatrix = [[Float]]()
         realMatrix.reserveCapacity(rows)
@@ -173,6 +201,20 @@ extension ComplexMatrix {
         }
 
         return ComplexMatrix(real: realMatrix, imag: imagMatrix)
+    }
+
+    /// Create from flat arrays with size validation.
+    ///
+    /// - Throws: `ComplexMatrixError.sizeMismatch` if array sizes don't match rows × cols.
+    public static func fromFlatValidated(real: [Float], imag: [Float], rows: Int, cols: Int) throws -> ComplexMatrix {
+        let expected = rows * cols
+        guard real.count == expected else {
+            throw ComplexMatrixError.sizeMismatch(expected: expected, actual: real.count)
+        }
+        guard imag.count == expected else {
+            throw ComplexMatrixError.sizeMismatch(expected: expected, actual: imag.count)
+        }
+        return fromFlat(real: real, imag: imag, rows: rows, cols: cols)
     }
 }
 
@@ -221,13 +263,26 @@ public struct ContiguousComplexMatrix: Sendable {
     ///   - imag: Flat array of imaginary components (row-major).
     ///   - rows: Number of rows.
     ///   - cols: Number of columns.
+    /// - Note: For validation, use `validated(real:imag:rows:cols:)` which throws on size mismatch.
     public init(real: [Float], imag: [Float], rows: Int, cols: Int) {
-        precondition(real.count == rows * cols, "Real array size must equal rows * cols")
-        precondition(imag.count == rows * cols, "Imag array size must equal rows * cols")
         self.real = real
         self.imag = imag
         self.rows = rows
         self.cols = cols
+    }
+
+    /// Create a contiguous complex matrix with validation.
+    ///
+    /// - Throws: `ComplexMatrixError.dataSizeMismatch` if array sizes don't match rows × cols.
+    public static func validated(real: [Float], imag: [Float], rows: Int, cols: Int) throws -> ContiguousComplexMatrix {
+        let expected = rows * cols
+        guard real.count == expected else {
+            throw ComplexMatrixError.dataSizeMismatch(expected: expected, actual: real.count)
+        }
+        guard imag.count == expected else {
+            throw ComplexMatrixError.dataSizeMismatch(expected: expected, actual: imag.count)
+        }
+        return ContiguousComplexMatrix(real: real, imag: imag, rows: rows, cols: cols)
     }
 
     /// Create a zero-filled contiguous complex matrix.
@@ -340,9 +395,6 @@ public struct ContiguousComplexMatrix: Sendable {
         cols: Int
     ) -> ContiguousComplexMatrix {
         let count = rows * cols
-        precondition(magnitude.count == count, "Magnitude size must equal rows * cols")
-        precondition(phase.count == count, "Phase size must equal rows * cols")
-
         var real = [Float](repeating: 0, count: count)
         var imag = [Float](repeating: 0, count: count)
 
@@ -444,8 +496,27 @@ public struct ContiguousMatrix: Sendable {
     ///   - data: Flat array in row-major order.
     ///   - rows: Number of rows.
     ///   - cols: Number of columns.
+    /// - Note: For validation, use `validated(data:rows:cols:)` which throws on size mismatch.
     public init(data: [Float], rows: Int, cols: Int) {
-        precondition(data.count == rows * cols, "Data size must equal rows * cols")
+        self.data = data
+        self.rows = rows
+        self.cols = cols
+    }
+
+    /// Create a contiguous matrix with validation.
+    ///
+    /// - Throws: `ComplexMatrixError.dataSizeMismatch` if data size doesn't match rows × cols.
+    public static func validated(data: [Float], rows: Int, cols: Int) throws -> ContiguousMatrix {
+        let expected = rows * cols
+        guard data.count == expected else {
+            throw ComplexMatrixError.dataSizeMismatch(expected: expected, actual: data.count)
+        }
+        return ContiguousMatrix(data: data, rows: rows, cols: cols)
+    }
+
+    // Internal-only initializer for backward compatibility
+    @inline(__always)
+    init(uncheckedData data: [Float], rows: Int, cols: Int) {
         self.data = data
         self.rows = rows
         self.cols = cols
@@ -570,7 +641,9 @@ public struct ContiguousMatrix: Sendable {
     ///
     /// - Parameter transform: Closure that transforms the flat data array.
     /// - Returns: New matrix with transformed data.
+    /// - Note: The transform must return an array of the same size.
     public func map(_ transform: ([Float]) -> [Float]) -> ContiguousMatrix {
+        // Safe to use unchecked - transform should preserve size
         ContiguousMatrix(data: transform(data), rows: rows, cols: cols)
     }
 
@@ -578,6 +651,7 @@ public struct ContiguousMatrix: Sendable {
     public var squared: ContiguousMatrix {
         var result = [Float](repeating: 0, count: count)
         vDSP_vsq(data, 1, &result, 1, vDSP_Length(count))
+        // Safe to use unchecked - result has same size
         return ContiguousMatrix(data: result, rows: rows, cols: cols)
     }
 
@@ -586,6 +660,7 @@ public struct ContiguousMatrix: Sendable {
         var result = [Float](repeating: 0, count: count)
         var n = Int32(count)
         vvsqrtf(&result, data, &n)
+        // Safe to use unchecked - result has same size
         return ContiguousMatrix(data: result, rows: rows, cols: cols)
     }
 
@@ -603,6 +678,7 @@ public struct ContiguousMatrix: Sendable {
         var n = Int32(count)
         vvlogf(&result, clamped, &n)
 
+        // Safe to use unchecked - we created result with correct size
         return ContiguousMatrix(data: result, rows: rows, cols: cols)
     }
 
@@ -642,8 +718,8 @@ public struct ContiguousMatrix: Sendable {
     ///
     /// - Parameter vector: Column vector (length must equal cols).
     /// - Returns: Result vector (length = rows).
+    /// - Note: Vector length must equal cols; behavior is undefined otherwise.
     public func matVecMul(_ vector: [Float]) -> [Float] {
-        precondition(vector.count == cols, "Vector length must equal cols")
 
         var result = [Float](repeating: 0, count: rows)
 
