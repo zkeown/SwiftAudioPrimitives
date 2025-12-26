@@ -141,7 +141,8 @@ public struct PCEN: Sendable {
         // Compute smoothed energy M via IIR filter
         let M = computeSmoothed(spectrogram, initialM: initialM)
 
-        // Apply PCEN formula
+        // Apply PCEN formula using log-space computation for numerical stability
+        // This matches librosa's implementation exactly
         var result = [[Float]]()
         result.reserveCapacity(nFreqs)
 
@@ -150,7 +151,8 @@ public struct PCEN: Sendable {
         let r = config.power
         let eps = config.eps
 
-        // Pre-compute delta^r for offset
+        // Pre-compute constants
+        let logEps = log(eps)
         let deltaR = pow(delta, r)
 
         for freqIdx in 0..<nFreqs {
@@ -160,11 +162,15 @@ public struct PCEN: Sendable {
                 let E = spectrogram[freqIdx][frameIdx]
                 let m = M[freqIdx][frameIdx]
 
-                // AGC: E / (eps + M)^alpha
-                let agc = E / pow(eps + m, alpha)
+                // Log-space AGC computation (more numerically stable):
+                // smooth = exp(-alpha * (log(eps) + log1p(M/eps)))
+                //        = 1 / (eps + M)^alpha
+                let smooth = exp(-alpha * (logEps + log1p(m / eps)))
 
-                // Output: (agc + delta)^r - delta^r
-                row[frameIdx] = pow(agc + delta, r) - deltaR
+                // Output: delta^r * expm1(r * log1p(E * smooth / delta))
+                // This is mathematically equivalent to: (E * smooth + delta)^r - delta^r
+                // but more stable for small values
+                row[frameIdx] = deltaR * expm1(r * log1p(E * smooth / delta))
             }
 
             result.append(row)
@@ -199,7 +205,7 @@ public struct PCEN: Sendable {
             finalM[freqIdx] = M[freqIdx][nFrames - 1]
         }
 
-        // Apply PCEN formula
+        // Apply PCEN formula using log-space computation for numerical stability
         var result = [[Float]]()
         result.reserveCapacity(nFreqs)
 
@@ -207,6 +213,7 @@ public struct PCEN: Sendable {
         let delta = config.bias
         let r = config.power
         let eps = config.eps
+        let logEps = log(eps)
         let deltaR = pow(delta, r)
 
         for freqIdx in 0..<nFreqs {
@@ -215,8 +222,8 @@ public struct PCEN: Sendable {
             for frameIdx in 0..<nFrames {
                 let E = spectrogram[freqIdx][frameIdx]
                 let m = M[freqIdx][frameIdx]
-                let agc = E / pow(eps + m, alpha)
-                row[frameIdx] = pow(agc + delta, r) - deltaR
+                let smooth = exp(-alpha * (logEps + log1p(m / eps)))
+                row[frameIdx] = deltaR * expm1(r * log1p(E * smooth / delta))
             }
 
             result.append(row)
@@ -228,6 +235,14 @@ public struct PCEN: Sendable {
     // MARK: - Private Implementation
 
     /// Compute smoothed energy via IIR low-pass filter.
+    ///
+    /// Uses Direct Form II transposed implementation matching scipy.signal.lfilter.
+    /// The filter equation is: M[t] = b * S[t] + (1-b) * M[t-1]
+    ///
+    /// librosa initializes with zi = lfilter_zi = (1-b), a constant shared across
+    /// all frequency bands. This means M[0] = b * S[0] + zi = b * S[0] + (1-b).
+    ///
+    /// For streaming with initialM, we use the provided initial state per band.
     private func computeSmoothed(
         _ spectrogram: [[Float]],
         initialM: [Float]?
@@ -240,16 +255,28 @@ public struct PCEN: Sendable {
         var M = [[Float]]()
         M.reserveCapacity(nFreqs)
 
+        // librosa uses zi = lfilter_zi([b], [1, b-1]) = (1-b) as initial delay state
+        // This is a constant shared across all frequency bands
+        let defaultZi = oneMinusB
+
         for freqIdx in 0..<nFreqs {
             var row = [Float](repeating: 0, count: nFrames)
 
-            // Initialize M[0]
-            let m0 = initialM?[freqIdx] ?? spectrogram[freqIdx][0]
-            row[0] = oneMinusB * m0 + b * spectrogram[freqIdx][0]
+            // Initialize M[0] using Direct Form II transposed:
+            // y[0] = b * x[0] + zi
+            // For streaming, use provided initialM; otherwise use librosa's default zi
+            if let initial = initialM {
+                // For streaming: zi = (1-b) * previous_M_final
+                // So M[0] = b * S[0] + (1-b) * initial[freqIdx]
+                row[0] = b * spectrogram[freqIdx][0] + oneMinusB * initial[freqIdx]
+            } else {
+                // Match librosa: zi = (1-b), constant for all bands
+                row[0] = b * spectrogram[freqIdx][0] + defaultZi
+            }
 
-            // IIR filter: M[t] = (1-b) * M[t-1] + b * E[t]
+            // IIR filter: M[t] = b * S[t] + (1-b) * M[t-1]
             for frameIdx in 1..<nFrames {
-                row[frameIdx] = oneMinusB * row[frameIdx - 1] + b * spectrogram[freqIdx][frameIdx]
+                row[frameIdx] = b * spectrogram[freqIdx][frameIdx] + oneMinusB * row[frameIdx - 1]
             }
 
             M.append(row)

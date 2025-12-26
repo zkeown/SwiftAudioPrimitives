@@ -121,9 +121,14 @@ public struct ValidationTolerances {
     /// Tests passing - tightened from 1e-4 to 5e-5 (2x improvement)
     public static let rmsEnergy: Double = 5e-5
 
-    /// Delta features: FIR filtering
+    /// Delta features (1st derivative): FIR filtering
     /// Tightened from 1e-4 to 5e-5 (2x improvement)
     public static let delta: Double = 5e-5
+
+    /// Delta2 features (2nd derivative): FIR filtering with higher-order coefficients
+    /// 2nd derivatives have larger numerical errors due to coefficient magnitudes
+    /// and compound edge handling effects
+    public static let delta2: Double = 2e-3
 
     /// Chromagram: pitch class projection
     public static let chromagram: Double = 1e-3
@@ -148,6 +153,7 @@ public struct ValidationTolerances {
     public static let mfccCorrelation: Double = 0.99
 
     /// PCEN: adaptive gain with log compression
+    /// Uses log-space computation matching librosa for numerical stability
     public static let pcen: Double = 1e-3
 
     /// dB conversions: 10*log10 or 20*log10

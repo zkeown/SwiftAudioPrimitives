@@ -106,27 +106,21 @@ public struct PolyFeatures: Sendable {
         }
         self.freqIndices = indices
 
-        // Normalize frequencies to [0, 1] for numerical stability
+        // Use actual frequencies in Hz (matching librosa's poly_features)
         let selectedFreqs: [Float]
         if indices.isEmpty {
             selectedFreqs = [0]
         } else {
-            let minF = frequencies[indices.first!]
-            let maxF = frequencies[indices.last!]
-            let range = maxF - minF
-            if range > 0 {
-                selectedFreqs = indices.map { (frequencies[$0] - minF) / range }
-            } else {
-                selectedFreqs = indices.map { _ in Float(0.5) }
-            }
+            selectedFreqs = indices.map { frequencies[$0] }
         }
 
-        // Build Vandermonde design matrix F: (nFreqs, order+1)
+        // Build Vandermonde design matrix F: (order+1, nFreqs)
+        // librosa uses descending order: [x^order, x^(order-1), ..., x^1, x^0]
         let nCoeffs = config.order + 1
         var F = [[Float]]()
         F.reserveCapacity(nCoeffs)
 
-        for p in 0...config.order {
+        for p in stride(from: config.order, through: 0, by: -1) {
             var row = [Float](repeating: 0, count: selectedFreqs.count)
             for (i, f) in selectedFreqs.enumerated() {
                 row[i] = pow(f, Float(p))

@@ -443,15 +443,16 @@ public struct CQT: Sendable {
 
         // Pre-compute normalization factors
         // For librosa compatibility with norm=1:
-        // - Divide by L1 norm (sum of window values) for L1 normalization
-        // - Multiply by sqrt(filterLength) to compensate for energy in longer filters
-        // - Multiply by sqrt(downsampleFactor) to compensate for energy loss from decimation
-        // This matches librosa's internal scaling: basis *= lengths / float(n_fft)
+        // - Divide kernel by L1 norm for L1 normalization
+        // - Multiply by sqrt(filterLength) for matched filter energy scaling
+        // - Multiply by sqrt(downsampleFactor) to compensate for decimation energy loss
+        // This matches librosa's approach: divide by (l1Norm / sqrt(filterLength))
         let normFactors: [Float] = octave.filters.map { filter in
             if filter.l1Norm > 0 {
-                let energyScale = sqrt(Float(filter.filterLength))
+                let sqrtN = sqrt(Float(filter.filterLength))
+                let normFactor = filter.l1Norm / sqrtN
                 let downsampleScale = sqrt(Float(octave.downsampleFactor))
-                return energyScale * downsampleScale / filter.l1Norm
+                return downsampleScale / normFactor
             }
             return 1.0
         }

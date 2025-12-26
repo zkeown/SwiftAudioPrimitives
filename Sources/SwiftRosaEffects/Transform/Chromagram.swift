@@ -195,6 +195,10 @@ public struct Chromagram: Sendable {
 
     /// Compute chromagram from pre-computed CQT magnitude.
     ///
+    /// Uses the same CQT-to-chroma mapping as librosa.filters.cq_to_chroma:
+    /// - Merges `binsPerOctave / nChroma` CQT bins per chroma bin
+    /// - Applies proper centering and rotation based on fmin
+    ///
     /// - Parameter cqtMagnitude: CQT magnitude of shape (nBins, nFrames).
     /// - Returns: Chromagram of shape (nChroma, nFrames).
     public func fromCQT(_ cqtMagnitude: [[Float]]) -> [[Float]] {
@@ -202,22 +206,123 @@ public struct Chromagram: Sendable {
 
         let nBins = cqtMagnitude.count
         let nFrames = cqtMagnitude[0].count
-        let binsPerChroma = nBins / config.nChroma
+
+        // Build the CQT-to-chroma mapping matrix (matches librosa.filters.cq_to_chroma)
+        let cqToChroma = Self.computeCQToChromaMatrix(
+            nInput: nBins,
+            binsPerOctave: config.binsPerOctave,
+            nChroma: config.nChroma,
+            fmin: 32.70  // C1, the default in Swift CQT
+        )
 
         // Initialize chroma
         var chroma = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: config.nChroma)
 
-        // Fold CQT bins into chroma
-        for bin in 0..<nBins {
-            let chromaIndex = bin % config.nChroma
-
+        // Apply the transformation: chroma = cqToChroma @ cqtMagnitude
+        for chromaIdx in 0..<config.nChroma {
             for frame in 0..<nFrames {
-                chroma[chromaIndex][frame] += cqtMagnitude[bin][frame]
+                var sum: Float = 0
+                for bin in 0..<nBins {
+                    sum += cqToChroma[chromaIdx][bin] * cqtMagnitude[bin][frame]
+                }
+                chroma[chromaIdx][frame] = sum
             }
         }
 
         // Normalize
         return normalizeChroma(chroma)
+    }
+
+    /// Compute the CQT-to-chroma transformation matrix.
+    ///
+    /// Matches librosa.filters.cq_to_chroma exactly:
+    /// 1. Create identity matrix repeated for each merge group
+    /// 2. Roll to center on target bin
+    /// 3. Tile for all octaves
+    /// 4. Rotate based on fmin (so C1 maps to chroma bin 0 = C)
+    ///
+    /// - Parameters:
+    ///   - nInput: Number of CQT bins
+    ///   - binsPerOctave: CQT bins per octave
+    ///   - nChroma: Number of output chroma bins
+    ///   - fmin: Minimum frequency of CQT (default C1 = 32.70 Hz)
+    /// - Returns: Transformation matrix of shape (nChroma, nInput)
+    private static func computeCQToChromaMatrix(
+        nInput: Int,
+        binsPerOctave: Int,
+        nChroma: Int,
+        fmin: Float
+    ) -> [[Float]] {
+        // How many CQT bins merge into each chroma bin
+        let nMerge = binsPerOctave / nChroma
+
+        // Build one octave of the mapping: (nChroma x binsPerOctave)
+        // Start with identity repeated for each merge group
+        var oneOctave = [[Float]](
+            repeating: [Float](repeating: 0, count: binsPerOctave),
+            count: nChroma
+        )
+
+        for chromaIdx in 0..<nChroma {
+            for mergeIdx in 0..<nMerge {
+                let binIdx = chromaIdx * nMerge + mergeIdx
+                if binIdx < binsPerOctave {
+                    oneOctave[chromaIdx][binIdx] = 1.0
+                }
+            }
+        }
+
+        // Roll left by nMerge/2 to center on target bin
+        let rollAmount = nMerge / 2
+        for chromaIdx in 0..<nChroma {
+            var rolled = [Float](repeating: 0, count: binsPerOctave)
+            for i in 0..<binsPerOctave {
+                let srcIdx = (i + rollAmount) % binsPerOctave
+                rolled[i] = oneOctave[chromaIdx][srcIdx]
+            }
+            oneOctave[chromaIdx] = rolled
+        }
+
+        // Compute number of octaves and tile
+        let nOctaves = Int(ceil(Float(nInput) / Float(binsPerOctave)))
+
+        // Build full matrix by tiling and trimming
+        var fullMatrix = [[Float]](
+            repeating: [Float](repeating: 0, count: nInput),
+            count: nChroma
+        )
+
+        for chromaIdx in 0..<nChroma {
+            for octave in 0..<nOctaves {
+                for binInOctave in 0..<binsPerOctave {
+                    let globalBin = octave * binsPerOctave + binInOctave
+                    if globalBin < nInput {
+                        fullMatrix[chromaIdx][globalBin] = oneOctave[chromaIdx][binInOctave]
+                    }
+                }
+            }
+        }
+
+        // Compute rotation based on fmin
+        // MIDI note number mod 12 tells us which chroma bin fmin corresponds to
+        let midiNote = 12.0 * log2(fmin / 440.0) + 69.0
+        let midi0 = midiNote.truncatingRemainder(dividingBy: 12.0)
+        let roll = Int(round(midi0 * Float(nChroma) / 12.0)) % nChroma
+
+        // Apply the roll to rows (rotate which chroma bin each CQT bin maps to)
+        if roll != 0 {
+            var rotated = [[Float]](
+                repeating: [Float](repeating: 0, count: nInput),
+                count: nChroma
+            )
+            for chromaIdx in 0..<nChroma {
+                let srcIdx = (chromaIdx - roll + nChroma) % nChroma
+                rotated[chromaIdx] = fullMatrix[srcIdx]
+            }
+            fullMatrix = rotated
+        }
+
+        return fullMatrix
     }
 
     /// Compute chromagram from pre-computed STFT magnitude.

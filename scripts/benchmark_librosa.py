@@ -637,7 +637,9 @@ def benchmark_pcen(signals: dict, sr: int) -> list:
         )
 
         def pcen_op():
-            return librosa.pcen(mel_spec * (2**31))
+            # Use mel spectrogram directly without int32 scaling
+            # This matches SwiftRosa's approach with normalized float audio
+            return librosa.pcen(mel_spec, sr=sr, hop_length=hop_length)
 
         result = benchmark_operation(
             name=f"pcen_{duration_name}",
