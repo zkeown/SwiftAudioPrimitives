@@ -135,53 +135,45 @@ public struct Tonnetz: Sendable {
 
     /// Compute the 6x12 transformation matrix.
     ///
-    /// phi[0,n] = sin(pi * n * 7 / 6)   # Fifth, sin
-    /// phi[1,n] = cos(pi * n * 7 / 6)   # Fifth, cos
-    /// phi[2,n] = sin(pi * n * 3 / 2)   # Minor third, sin (3 semitones)
-    /// phi[3,n] = cos(pi * n * 3 / 2)   # Minor third, cos
-    /// phi[4,n] = sin(pi * n * 2 / 3)   # Major third, sin (4 semitones)
-    /// phi[5,n] = cos(pi * n * 2 / 3)   # Major third, cos
+    /// Matches librosa.feature.tonnetz exactly:
+    /// ```python
+    /// dim_map = np.linspace(0, 12, num=n_chroma, endpoint=False)
+    /// scale = [7/6, 7/6, 3/2, 3/2, 2/3, 2/3]
+    /// V = outer(scale, dim_map)
+    /// V[::2] -= 0.5  # subtract 0.5 from even rows
+    /// R = [1, 1, 1, 1, 0.5, 0.5]
+    /// phi = R * cos(π * V)
+    /// ```
     private static func computeTransformMatrix(nChroma: Int) -> [[Float]] {
         var matrix = [[Float]]()
         matrix.reserveCapacity(6)
 
-        // Fifth circle (7 semitones = perfect fifth)
-        var fifthSin = [Float](repeating: 0, count: nChroma)
-        var fifthCos = [Float](repeating: 0, count: nChroma)
+        // Scale factors for each dimension
+        let scale: [Float] = [7.0 / 6.0, 7.0 / 6.0, 3.0 / 2.0, 3.0 / 2.0, 2.0 / 3.0, 2.0 / 3.0]
 
-        // Minor third circle (3 semitones)
-        var minorSin = [Float](repeating: 0, count: nChroma)
-        var minorCos = [Float](repeating: 0, count: nChroma)
+        // Amplitude scaling (major third uses 0.5)
+        let R: [Float] = [1.0, 1.0, 1.0, 1.0, 0.5, 0.5]
 
-        // Major third circle (4 semitones)
-        var majorSin = [Float](repeating: 0, count: nChroma)
-        var majorCos = [Float](repeating: 0, count: nChroma)
+        for row in 0..<6 {
+            var rowValues = [Float](repeating: 0, count: nChroma)
 
-        for n in 0..<nChroma {
-            let nf = Float(n)
+            for n in 0..<nChroma {
+                let nf = Float(n)
 
-            // Fifth: 7 semitones per step around circle of fifths
-            let fifthAngle = Float.pi * nf * 7.0 / 6.0
-            fifthSin[n] = sin(fifthAngle)
-            fifthCos[n] = cos(fifthAngle)
+                // V = scale[row] * n
+                var v = scale[row] * nf
 
-            // Minor third: 3 semitones (4 minor thirds = octave)
-            let minorAngle = Float.pi * nf * 3.0 / 2.0
-            minorSin[n] = sin(minorAngle)
-            minorCos[n] = cos(minorAngle)
+                // Even rows (0, 2, 4) get -0.5 offset
+                if row % 2 == 0 {
+                    v -= 0.5
+                }
 
-            // Major third: 4 semitones (3 major thirds = octave)
-            let majorAngle = Float.pi * nf * 2.0 / 3.0
-            majorSin[n] = sin(majorAngle)
-            majorCos[n] = cos(majorAngle)
+                // phi = R * cos(π * V)
+                rowValues[n] = R[row] * cos(Float.pi * v)
+            }
+
+            matrix.append(rowValues)
         }
-
-        matrix.append(fifthSin)
-        matrix.append(fifthCos)
-        matrix.append(minorSin)
-        matrix.append(minorCos)
-        matrix.append(majorSin)
-        matrix.append(majorCos)
 
         return matrix
     }

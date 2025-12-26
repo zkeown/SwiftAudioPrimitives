@@ -83,9 +83,16 @@ public struct VQTConfig: Sendable {
         fMin * pow(2.0, Float(nBins) / Float(binsPerOctave))
     }
 
-    /// Reference Q factor (for CQT-like behavior).
+    /// Alpha parameter for Q factor calculation (matches librosa's definition).
+    /// This is derived from the geometric mean of adjacent frequencies.
+    private var alpha: Float {
+        let ratio = pow(2.0, 2.0 / Float(binsPerOctave))
+        return (ratio - 1) / (ratio + 1)
+    }
+
+    /// Reference Q factor (for CQT-like behavior, matches librosa).
     public var QRef: Float {
-        filterScale / (pow(2.0, 1.0 / Float(binsPerOctave)) - 1)
+        filterScale / alpha
     }
 
     /// Get center frequency for a bin.
@@ -313,13 +320,17 @@ public struct VQT: Sendable {
                 imagKernel[i] = window[i] * sin(phase)
             }
 
-            // Normalize kernel
-            var norm: Float = 0
-            vDSP_dotpr(window, 1, window, 1, &norm, vDSP_Length(evenLength))
-            norm = sqrt(norm)
+            // Normalize kernel to match librosa's CQT/VQT normalization
+            // librosa uses L1 normalization (sum(|filter|) = 1) then applies sqrt(N) scaling
+            // For matching output: divide kernel by L1, then response is multiplied by sqrt(N)
+            // This is equivalent to dividing the kernel by L1/sqrt(N)
+            var l1Norm: Float = 0
+            vDSP_sve(window, 1, &l1Norm, vDSP_Length(evenLength))
+            let sqrtN = sqrt(Float(evenLength))
+            let normFactor = l1Norm / sqrtN
 
-            if norm > 0 {
-                var scale = 1.0 / norm
+            if normFactor > 0 {
+                var scale = 1.0 / normFactor
                 vDSP_vsmul(realKernel, 1, &scale, &realKernel, 1, vDSP_Length(evenLength))
                 vDSP_vsmul(imagKernel, 1, &scale, &imagKernel, 1, vDSP_Length(evenLength))
             }
@@ -355,18 +366,10 @@ public struct VQT: Sendable {
         var padded = [Float]()
         padded.reserveCapacity(signal.count + 2 * padLength)
 
-        // Reflect padding
-        for i in (1...padLength).reversed() {
-            let idx = i % signal.count
-            padded.append(signal[idx])
-        }
-
+        // Zero padding (matches librosa's default pad_mode='constant')
+        padded.append(contentsOf: [Float](repeating: 0, count: padLength))
         padded.append(contentsOf: signal)
-
-        for i in 1...padLength {
-            let idx = (signal.count - 1) - (i % signal.count)
-            padded.append(signal[max(0, idx)])
-        }
+        padded.append(contentsOf: [Float](repeating: 0, count: padLength))
 
         return padded
     }

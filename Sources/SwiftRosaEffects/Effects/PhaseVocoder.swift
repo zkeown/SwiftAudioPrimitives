@@ -69,7 +69,7 @@ public struct PhaseVocoder: Sendable {
             winLength: config.nFFT,
             windowType: config.windowType,
             center: true,
-            padMode: .reflect
+            padMode: .constant(0)  // Match librosa's default (zero padding)
         )
 
         self.stft = STFT(config: stftConfig)
@@ -95,8 +95,11 @@ public struct PhaseVocoder: Sendable {
         // Stretch spectrogram
         let stretchedSpec = stretchSpectrogram(spectrogram, rate: rate)
 
-        // Reconstruct
-        return await istft.transform(stretchedSpec)
+        // Expected output length (matches librosa's calculation)
+        let expectedLength = Int(round(Float(signal.count) / rate))
+
+        // Reconstruct with expected length
+        return await istft.transform(stretchedSpec, length: expectedLength)
     }
 
     /// Pitch-shift audio without changing duration.
@@ -116,17 +119,20 @@ public struct PhaseVocoder: Sendable {
         guard semitones != 0 else { return signal }
         guard !signal.isEmpty else { return [] }
 
-        // Pitch shift ratio
-        let ratio = pow(2.0, semitones / 12.0)
+        // librosa's algorithm:
+        // rate = 2^(-n_steps/12)  (note the negative sign!)
+        // time_stretch(rate) then resample from sr/rate to sr
+        let rate = pow(2.0, -semitones / 12.0)
 
-        // Time-stretch by inverse ratio
-        let stretched = await timeStretch(signal, rate: 1.0 / ratio)
+        // Time-stretch by rate
+        let stretched = await timeStretch(signal, rate: rate)
 
-        // Resample to original length
+        // Resample from (sampleRate / rate) to sampleRate
+        // This matches librosa's: resample(stretched, orig_sr=sr/rate, target_sr=sr)
         let resampled = await Resample.resample(
             stretched,
-            fromRate: sampleRate,
-            toRate: sampleRate * ratio,
+            fromRate: sampleRate / rate,
+            toRate: sampleRate,
             quality: .high
         )
 
@@ -169,46 +175,42 @@ public struct PhaseVocoder: Sendable {
         }
 
         for tOut in 0..<nFramesOut {
-            // Map output frame to input frame
+            // Map output frame to input frame position
+            // librosa: time_steps = np.arange(0, D.shape[-1], rate)
+            // So time_steps[0] = 0, time_steps[1] = rate, time_steps[2] = 2*rate, etc.
             let tInFloat = Float(tOut) * rate
             let tIn0 = min(Int(tInFloat), nFramesIn - 1)
             let tIn1 = min(tIn0 + 1, nFramesIn - 1)
             let alpha = tInFloat - Float(tIn0)
 
             for f in 0..<nFreqs {
-                // Interpolate magnitude
+                // Interpolate magnitude from current input frames
                 let mag0 = sqrt(spectrogram.real[f][tIn0] * spectrogram.real[f][tIn0] +
                                spectrogram.imag[f][tIn0] * spectrogram.imag[f][tIn0])
                 let mag1 = sqrt(spectrogram.real[f][tIn1] * spectrogram.real[f][tIn1] +
                                spectrogram.imag[f][tIn1] * spectrogram.imag[f][tIn1])
                 let mag = mag0 * (1 - alpha) + mag1 * alpha
 
-                if tOut > 0 && tIn1 > tIn0 {
-                    // Compute instantaneous frequency
-                    let phase0 = atan2(spectrogram.imag[f][tIn0], spectrogram.real[f][tIn0])
-                    let phase1 = atan2(spectrogram.imag[f][tIn1], spectrogram.real[f][tIn1])
-
-                    // Phase difference
-                    var phaseDiff = phase1 - phase0 - expectedPhaseAdvance[f]
-
-                    // Wrap to [-pi, pi]
-                    while phaseDiff > Float.pi { phaseDiff -= 2 * Float.pi }
-                    while phaseDiff < -Float.pi { phaseDiff += 2 * Float.pi }
-
-                    // True frequency deviation
-                    let instFreq = expectedPhaseAdvance[f] + phaseDiff
-
-                    // Accumulate phase at output hop rate
-                    phaseAccum[f] += instFreq / rate
-                }
-
-                // Wrap accumulated phase
-                while phaseAccum[f] > Float.pi { phaseAccum[f] -= 2 * Float.pi }
-                while phaseAccum[f] < -Float.pi { phaseAccum[f] += 2 * Float.pi }
-
-                // Convert to complex
+                // OUTPUT FIRST using current phaseAccum (before updating)
+                // This matches librosa's: d_stretch[..., t] = phasor(phase_acc, mag=mag)
                 realOut[f][tOut] = mag * cos(phaseAccum[f])
                 imagOut[f][tOut] = mag * sin(phaseAccum[f])
+
+                // THEN update phaseAccum for the next iteration
+                // Compute phase deviation between current pair of input frames
+                let phase0 = atan2(spectrogram.imag[f][tIn0], spectrogram.real[f][tIn0])
+                let phase1 = atan2(spectrogram.imag[f][tIn1], spectrogram.real[f][tIn1])
+
+                // Phase difference (unwrapped deviation from expected)
+                var dphase = phase1 - phase0 - expectedPhaseAdvance[f]
+
+                // Wrap to [-pi, pi]
+                while dphase > Float.pi { dphase -= 2 * Float.pi }
+                while dphase < -Float.pi { dphase += 2 * Float.pi }
+
+                // Accumulate for next iteration
+                // This matches librosa's: phase_acc += phi_advance + dphase
+                phaseAccum[f] += expectedPhaseAdvance[f] + dphase
             }
         }
 

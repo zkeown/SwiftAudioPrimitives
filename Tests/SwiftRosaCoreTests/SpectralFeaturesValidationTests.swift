@@ -87,8 +87,9 @@ final class SpectralFeaturesValidationTests: XCTestCase {
             }
         }
 
-        XCTAssertLessThan(maxRelError, 0.15,
-            "Spectral centroid max relative error \(maxRelError) exceeds 15% tolerance")
+        // Use strict tolerance - actual error is ~0.001%, tolerance is 0.005%
+        XCTAssertLessThan(maxRelError, ValidationTolerances.spectralCentroid,
+            "Spectral centroid max relative error \(maxRelError) exceeds tolerance \(ValidationTolerances.spectralCentroid)")
 
         // Centroid should be near 440 Hz for a pure 440 Hz sine
         let middleIdx = centroids.count / 2
@@ -186,10 +187,12 @@ final class SpectralFeaturesValidationTests: XCTestCase {
     }
 
     /// Test spectral bandwidth for white noise (should be wide)
+    /// Uses tighter broadband tolerance since noise is less sensitive to FFT artifacts
     func testSpectralBandwidth_WhiteNoise() async throws {
         let ref = try getReference()
         guard let spectralRef = ref["spectral_features"] as? [String: Any],
               let noiseRef = spectralRef["white_noise"] as? [String: Any],
+              let expectedBandwidth = noiseRef["bandwidth"] as? [Double],
               let nFFT = noiseRef["n_fft"] as? Int,
               let hopLength = noiseRef["hop_length"] as? Int else {
             throw XCTSkip("Spectral bandwidth reference data not found for white_noise")
@@ -209,6 +212,24 @@ final class SpectralFeaturesValidationTests: XCTestCase {
         let middleIdx = bandwidths.count / 2
         XCTAssertGreaterThan(bandwidths[middleIdx], 2000,
             "White noise bandwidth should be wide (>2000 Hz)")
+
+        // Validate against librosa with stricter broadband tolerance
+        // White noise is less sensitive to FFT noise than pure tones
+        var maxRelError: Double = 0
+        let startFrame = 5
+        let endFrame = min(startFrame + 10, bandwidths.count, expectedBandwidth.count)
+
+        for i in startFrame..<endFrame {
+            let expected = expectedBandwidth[i]
+            let actual = Double(bandwidths[i])
+            if expected > 100 {
+                let relError = abs(expected - actual) / expected
+                maxRelError = max(maxRelError, relError)
+            }
+        }
+
+        XCTAssertLessThan(maxRelError, ValidationTolerances.spectralBandwidthBroadband,
+            "White noise bandwidth error \(maxRelError) exceeds broadband tolerance \(ValidationTolerances.spectralBandwidthBroadband)")
     }
 
     // MARK: - Spectral Rolloff Tests
@@ -452,13 +473,16 @@ final class SpectralFeaturesValidationTests: XCTestCase {
 
         // RMS of unit sine should be 1/sqrt(2) ≈ 0.707
         let middleIdx = result.count / 2
-        XCTAssertEqual(result[middleIdx], 0.707, accuracy: 0.05,
+        XCTAssertEqual(result[middleIdx], 0.707, accuracy: 0.01,
             "RMS of unit sine should be ~0.707")
 
-        // Compare with librosa reference
+        // Compare with librosa reference using strict tolerance
+        // Actual error is ~8e-8, tolerance is 5e-5
         let refMiddle = expectedRMS.count / 2
-        XCTAssertEqual(Double(result[middleIdx]), expectedRMS[refMiddle], accuracy: 0.05,
-            "RMS should match librosa reference")
+        let absError = abs(Double(result[middleIdx]) - expectedRMS[refMiddle])
+        let relError = absError / expectedRMS[refMiddle]
+        XCTAssertLessThan(relError, ValidationTolerances.rmsEnergy,
+            "RMS relative error \(relError) exceeds tolerance \(ValidationTolerances.rmsEnergy)")
     }
 
     /// Test RMS for AM-modulated signal (should vary)

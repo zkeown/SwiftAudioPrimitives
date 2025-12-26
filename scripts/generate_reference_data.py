@@ -56,11 +56,18 @@ def generate_test_signals():
         'description': 'White noise (seed=42, amplitude=0.1)'
     }
 
-    # Frequency sweep (chirp)
+    # Frequency sweep (chirp) - uses same formula as Swift's TestSignalGenerator.chirp()
+    # Swift formula: instantFreq = fmin + rate * t / 2; sin(2*pi * instantFreq * t)
+    # This is a linear frequency sweep (quadratic phase)
+    fmin_chirp = 100
+    fmax_chirp = 8000
+    rate = (fmax_chirp - fmin_chirp) / duration
+    instant_freq = fmin_chirp + rate * t / 2
+    chirp_signal = np.sin(2 * np.pi * instant_freq * t).astype(np.float32)
     signals['chirp'] = {
-        'data': librosa.chirp(fmin=100, fmax=8000, sr=sr, duration=duration).astype(np.float32).tolist(),
+        'data': chirp_signal.tolist(),
         'sample_rate': sr,
-        'description': 'Linear chirp 100Hz to 8000Hz'
+        'description': 'Linear chirp 100Hz to 8000Hz (Swift-compatible formula)'
     }
 
     # Click train (impulses at regular intervals)
@@ -375,19 +382,29 @@ def generate_delta_reference(signal, sr, n_mfcc=13, n_fft=2048, hop_length=512):
 
 
 def generate_pcen_reference(signal, sr, n_fft=2048, hop_length=512, n_mels=128):
-    """Generate PCEN reference data."""
+    """Generate PCEN reference data.
+
+    Note: We use the mel spectrogram directly without scaling. The original
+    librosa PCEN defaults were designed for int32 PCM audio (2^31 range),
+    but modern usage with normalized float audio [-1, 1] works correctly
+    without scaling. SwiftRosa's PCEN implementation uses this approach.
+    """
     y = np.array(signal, dtype=np.float32)
 
     # Compute mel spectrogram
     mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_fft=n_fft,
                                                hop_length=hop_length, n_mels=n_mels)
 
-    # Apply PCEN with default parameters
-    pcen_default = librosa.pcen(mel_spec * (2**31))
+    # Apply PCEN with librosa default parameters (explicitly specified for clarity)
+    # Note: librosa defaults are gain=0.98, bias=2, power=0.5, time_constant=0.4, eps=1e-6
+    pcen_default = librosa.pcen(mel_spec, sr=sr, hop_length=hop_length,
+                                gain=0.98, bias=2.0, power=0.5,
+                                time_constant=0.4, eps=1e-6)
 
     # Apply PCEN with custom parameters
-    pcen_custom = librosa.pcen(mel_spec * (2**31), gain=0.8, bias=10, power=0.25,
-                                time_constant=0.06, eps=1e-6)
+    pcen_custom = librosa.pcen(mel_spec, sr=sr, hop_length=hop_length,
+                               gain=0.8, bias=10, power=0.25,
+                               time_constant=0.06, eps=1e-6)
 
     return {
         'n_fft': n_fft,
@@ -396,6 +413,13 @@ def generate_pcen_reference(signal, sr, n_fft=2048, hop_length=512, n_mels=128):
         'pcen_default': pcen_default.T.tolist(),
         'pcen_custom': pcen_custom.T.tolist(),
         'pcen_shape': list(pcen_default.shape),
+        'default_params': {
+            'gain': 0.98,
+            'bias': 2.0,
+            'power': 0.5,
+            'time_constant': 0.4,
+            'eps': 1e-6
+        },
         'custom_params': {
             'gain': 0.8,
             'bias': 10,
@@ -507,13 +531,22 @@ def generate_chromagram_reference(signal, sr, n_fft=2048, hop_length=512, n_chro
 
 
 def generate_tonnetz_reference(signal, sr, hop_length=512):
-    """Generate tonnetz reference data."""
+    """Generate tonnetz reference data.
+
+    Includes chroma_cqt for isolated tonnetz transformation validation.
+    """
     y = np.array(signal, dtype=np.float32)
 
-    tonnetz = librosa.feature.tonnetz(y=y, sr=sr)
+    # Get chroma_cqt (used internally by tonnetz)
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length)
+
+    # Get tonnetz
+    tonnetz = librosa.feature.tonnetz(y=y, sr=sr, hop_length=hop_length)
 
     return {
         'hop_length': hop_length,
+        'chroma_cqt': chroma.T.tolist(),  # (nFrames, 12) for JSON
+        'chroma_shape': list(chroma.shape),
         'tonnetz': tonnetz.T.tolist(),
         'shape': list(tonnetz.shape),
         'librosa_version': librosa.__version__
@@ -766,6 +799,85 @@ def generate_poly_features_reference(signal, sr, n_fft=2048, hop_length=512, ord
         'order': order,
         'poly_features': poly.T.tolist(),
         'shape': list(poly.shape),
+        'librosa_version': librosa.__version__
+    }
+
+
+# =============================================================================
+# EMPHASIS (PREEMPHASIS / DEEMPHASIS)
+# =============================================================================
+
+def generate_emphasis_reference(signal, sr, coef=0.97):
+    """Generate preemphasis and deemphasis reference data."""
+    y = np.array(signal, dtype=np.float32)
+
+    # Apply preemphasis
+    preemph = librosa.effects.preemphasis(y, coef=coef)
+
+    # Apply deemphasis
+    deemph = librosa.effects.deemphasis(y, coef=coef)
+
+    # Also test round-trip: preemph -> deemph should recover original
+    roundtrip = librosa.effects.deemphasis(preemph, coef=coef)
+
+    return {
+        'coef': coef,
+        'original_length': len(y),
+        'preemphasis': preemph.tolist(),
+        'deemphasis': deemph.tolist(),
+        'roundtrip': roundtrip.tolist(),
+        'preemphasis_energy': float(np.sum(preemph**2)),
+        'deemphasis_energy': float(np.sum(deemph**2)),
+        'roundtrip_error': float(np.max(np.abs(y - roundtrip))),
+        'librosa_version': librosa.__version__
+    }
+
+
+# =============================================================================
+# TIME STRETCH (END-TO-END)
+# =============================================================================
+
+def generate_time_stretch_reference(signal, sr, rate=1.5):
+    """Generate time_stretch reference data (end-to-end, not just phase vocoder)."""
+    y = np.array(signal, dtype=np.float32)
+
+    # librosa.effects.time_stretch uses phase_vocoder internally
+    stretched = librosa.effects.time_stretch(y, rate=rate)
+
+    return {
+        'rate': rate,
+        'original_length': len(y),
+        'stretched_length': len(stretched),
+        'first_500_samples': stretched[:500].tolist(),
+        'last_100_samples': stretched[-100:].tolist() if len(stretched) >= 100 else stretched.tolist(),
+        'stretched_energy': float(np.sum(stretched**2)),
+        'original_energy': float(np.sum(y**2)),
+        'energy_ratio': float(np.sum(stretched**2) / np.sum(y**2)) if np.sum(y**2) > 0 else 0,
+        'librosa_version': librosa.__version__
+    }
+
+
+# =============================================================================
+# PITCH SHIFT
+# =============================================================================
+
+def generate_pitch_shift_reference(signal, sr, n_steps=4):
+    """Generate pitch_shift reference data."""
+    y = np.array(signal, dtype=np.float32)
+
+    # librosa.effects.pitch_shift combines time_stretch + resample
+    shifted = librosa.effects.pitch_shift(y, sr=sr, n_steps=n_steps)
+
+    return {
+        'n_steps': n_steps,
+        'sample_rate': sr,
+        'original_length': len(y),
+        'shifted_length': len(shifted),
+        'first_500_samples': shifted[:500].tolist(),
+        'last_100_samples': shifted[-100:].tolist() if len(shifted) >= 100 else shifted.tolist(),
+        'shifted_energy': float(np.sum(shifted**2)),
+        'original_energy': float(np.sum(y**2)),
+        'energy_ratio': float(np.sum(shifted**2) / np.sum(y**2)) if np.sum(y**2) > 0 else 0,
         'librosa_version': librosa.__version__
     }
 
@@ -1039,6 +1151,57 @@ def main():
             signals['multi_tone']['data'], signals['multi_tone']['sample_rate'], order=order
         )
     reference_data['poly_features'] = poly_refs
+
+    # Emphasis (preemphasis / deemphasis) reference
+    print("Generating emphasis reference...")
+    emphasis_refs = {}
+    for name in ['sine_440hz', 'multi_tone', 'chirp']:
+        emphasis_refs[name] = {
+            'coef_0.97': generate_emphasis_reference(
+                signals[name]['data'], signals[name]['sample_rate'], coef=0.97
+            ),
+            'coef_0.95': generate_emphasis_reference(
+                signals[name]['data'], signals[name]['sample_rate'], coef=0.95
+            ),
+        }
+    reference_data['emphasis'] = emphasis_refs
+
+    # Time stretch reference
+    print("Generating time stretch reference...")
+    time_stretch_refs = {}
+    for name in ['sine_440hz', 'multi_tone']:
+        time_stretch_refs[name] = {
+            'rate_0.5': generate_time_stretch_reference(
+                signals[name]['data'], signals[name]['sample_rate'], rate=0.5
+            ),
+            'rate_0.8': generate_time_stretch_reference(
+                signals[name]['data'], signals[name]['sample_rate'], rate=0.8
+            ),
+            'rate_1.25': generate_time_stretch_reference(
+                signals[name]['data'], signals[name]['sample_rate'], rate=1.25
+            ),
+            'rate_2.0': generate_time_stretch_reference(
+                signals[name]['data'], signals[name]['sample_rate'], rate=2.0
+            ),
+        }
+    reference_data['time_stretch'] = time_stretch_refs
+
+    # Pitch shift reference
+    print("Generating pitch shift reference...")
+    pitch_shift_refs = {}
+    for name in ['sine_440hz', 'multi_tone']:
+        pitch_shift_refs[name] = {
+            'steps_2': generate_pitch_shift_reference(
+                signals[name]['data'], signals[name]['sample_rate'], n_steps=2
+            ),
+            'steps_4': generate_pitch_shift_reference(
+                signals[name]['data'], signals[name]['sample_rate'], n_steps=4
+            ),
+            'steps_-3': generate_pitch_shift_reference(
+                signals[name]['data'], signals[name]['sample_rate'], n_steps=-3
+            ),
+        }
+    reference_data['pitch_shift'] = pitch_shift_refs
 
     # Save to JSON
     output_file = output_dir / 'librosa_reference.json'

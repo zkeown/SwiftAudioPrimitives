@@ -110,7 +110,8 @@ final class STFTValidationTests: XCTestCase {
         var worstFrame = 0
         var worstExpected: Double = 0
         var worstActual: Double = 0
-        let framesToCompare = min(10, expectedFrames, result.cols)
+        // Compare 20 frames to catch more edge cases (was 10)
+        let framesToCompare = min(20, expectedFrames, result.cols)
 
         // Debug: print first few values
         print("STFT DEBUG: expectedMagnitude[0][0..5]: \(expectedMagnitude[0][0..<5])")
@@ -170,7 +171,8 @@ final class STFTValidationTests: XCTestCase {
         let magnitude = result.magnitude
 
         var maxRelError: Double = 0
-        let framesToCompare = min(10, expectedMagnitude.count, result.cols)
+        // Compare 20 frames to catch more edge cases (was 10)
+        let framesToCompare = min(20, expectedMagnitude.count, result.cols)
         let freqsToCompare = min(expectedMagnitude.first?.count ?? 0, magnitude.count)
 
         for frameIdx in 0..<framesToCompare {
@@ -215,7 +217,8 @@ final class STFTValidationTests: XCTestCase {
         let magnitude = result.magnitude
 
         var maxRelError: Double = 0
-        let framesToCompare = min(10, expectedMagnitude.count, result.cols)
+        // Compare 20 frames to catch more edge cases (was 10)
+        let framesToCompare = min(20, expectedMagnitude.count, result.cols)
         let freqsToCompare = min(expectedMagnitude.first?.count ?? 0, magnitude.count)
 
         for frameIdx in 0..<framesToCompare {
@@ -230,8 +233,9 @@ final class STFTValidationTests: XCTestCase {
             }
         }
 
-        XCTAssertLessThan(maxRelError, ValidationTolerances.stftMagnitude * 10,  // Chirp has more variation
-            "STFT chirp max relative error \(maxRelError) exceeds tolerance")
+        // Use explicit chirp tolerance instead of ad-hoc multiplier
+        XCTAssertLessThan(maxRelError, ValidationTolerances.stftMagnitudeChirp,
+            "STFT chirp max relative error \(maxRelError) exceeds tolerance \(ValidationTolerances.stftMagnitudeChirp)")
     }
 
     // MARK: - ISTFT Round-Trip Tests
@@ -656,7 +660,8 @@ final class STFTValidationTests: XCTestCase {
         var worstMel = 0
         var worstExpected: Double = 0
         var worstActual: Double = 0
-        let framesToCompare = min(10, expectedMel.count, result.first?.count ?? 0)
+        // Compare 20 frames to catch more edge cases (was 10)
+        let framesToCompare = min(20, expectedMel.count, result.first?.count ?? 0)
         let melsToCompare = min(nMels, result.count)
 
         // Debug output - dimensions

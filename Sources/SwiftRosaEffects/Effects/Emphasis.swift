@@ -36,7 +36,7 @@ public struct Emphasis: Sendable {
     ///
     /// - Note: Matches `librosa.effects.preemphasis(y, coef=0.97)`
     public static func preemphasis(_ signal: [Float], coef: Float = 0.97) -> [Float] {
-        guard !signal.isEmpty else { return [] }
+        guard signal.count >= 2 else { return signal }
         guard coef >= 0 && coef < 1 else {
             // Invalid coefficient, return unchanged
             return signal
@@ -44,10 +44,14 @@ public struct Emphasis: Sendable {
 
         var result = [Float](repeating: 0, count: signal.count)
 
-        // First sample is unchanged (or could use x[0] - coef * x[0], but librosa uses x[0])
-        result[0] = signal[0]
+        // librosa uses scipy.signal.lfilter with zi = 2*x[0] - x[1]
+        // For FIR filter b=[1, -coef], a=[1], lfilter computes:
+        //   y[0] = x[0] + zi
+        //   y[n] = x[n] - coef*x[n-1]  for n >= 1
+        let zi = 2 * signal[0] - signal[1]
+        result[0] = signal[0] + zi
 
-        // Apply first-order difference filter
+        // Apply first-order difference filter for remaining samples
         for i in 1..<signal.count {
             result[i] = signal[i] - coef * signal[i - 1]
         }
@@ -70,7 +74,7 @@ public struct Emphasis: Sendable {
     ///
     /// - Note: Matches `librosa.effects.deemphasis(y, coef=0.97)`
     public static func deemphasis(_ signal: [Float], coef: Float = 0.97) -> [Float] {
-        guard !signal.isEmpty else { return [] }
+        guard signal.count >= 2 else { return signal }
         guard coef >= 0 && coef < 1 else {
             // Invalid coefficient, return unchanged
             return signal
@@ -78,12 +82,20 @@ public struct Emphasis: Sendable {
 
         var result = [Float](repeating: 0, count: signal.count)
 
-        // First sample is unchanged
+        // Apply first-order IIR filter (recursive): y[n] = x[n] + coef*y[n-1]
         result[0] = signal[0]
-
-        // Apply first-order IIR filter (recursive)
         for i in 1..<signal.count {
             result[i] = signal[i] + coef * result[i - 1]
+        }
+
+        // librosa applies a correction to account for the linear extrapolation
+        // used in preemphasis initialization. The correction is:
+        //   result[n] -= ((2 - coef) * x[0] - x[1]) / (3 - coef) * coef^n
+        let correctionBase = ((2 - coef) * signal[0] - signal[1]) / (3 - coef)
+        var coefPower: Float = 1.0
+        for i in 0..<signal.count {
+            result[i] -= correctionBase * coefPower
+            coefPower *= coef
         }
 
         return result
